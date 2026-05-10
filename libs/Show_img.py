@@ -1,9 +1,9 @@
 from core_lib import get_path
 
 def show_image_dialog(parent, image_path, title="图片查看器"):
-    from PyQt5.QtWidgets import QDialog, QLabel, QApplication, QHBoxLayout, QPushButton, QWidget
-    from PyQt5.QtGui import QPixmap
-    from PyQt5.QtCore import Qt, QPoint
+    from PySide6.QtWidgets import QDialog, QLabel, QApplication, QHBoxLayout, QPushButton, QWidget
+    from PySide6.QtGui import QPixmap
+    from PySide6.QtCore import Qt, QPoint
 
     class ImageViewer(QDialog):
         def __init__(self, parent, path, title):
@@ -60,6 +60,9 @@ def show_image_dialog(parent, image_path, title="图片查看器"):
 
             # 初始居中显示
             self.center_image()
+
+            # 天梯图默认以最大化窗口打开，兼容笔记本和台式机显示
+            self.setWindowState(self.windowState() | Qt.WindowMaximized)
 
         def create_control_buttons(self):
             """创建控制按钮"""
@@ -133,7 +136,7 @@ def show_image_dialog(parent, image_path, title="图片查看器"):
 
         def wheelEvent(self, event):
             # 获取鼠标在图片上的相对位置，用于缩放中心点
-            old_pos = self.label.mapFrom(self, event.pos())
+            old_pos = self.label.mapFrom(self, event.position().toPoint())
 
             # 计算缩放因子
             factor = 1.2 if event.angleDelta().y() > 0 else 0.8
@@ -174,15 +177,16 @@ def show_image_dialog(parent, image_path, title="图片查看器"):
         def mousePressEvent(self, event):
             # 支持左键和右键拖动
             if event.button() in (Qt.LeftButton, Qt.RightButton):
-                self.drag_start = event.pos()
+                self.drag_start = event.position().toPoint()
                 self.is_dragging = True
                 self.drag_button = event.button()
                 QApplication.setOverrideCursor(Qt.ClosedHandCursor)
 
         def mouseMoveEvent(self, event):
             if self.is_dragging and event.buttons() & (Qt.LeftButton | Qt.RightButton):
-                delta = event.pos() - self.drag_start
-                self.drag_start = event.pos()
+                event_pos = event.position().toPoint()
+                delta = event_pos - self.drag_start
+                self.drag_start = event_pos
 
                 # 更新图片位置
                 self.image_pos += delta
@@ -257,7 +261,7 @@ def show_image_dialog(parent, image_path, title="图片查看器"):
             super().keyPressEvent(event)
 
     dlg = ImageViewer(parent, image_path, title)
-    dlg.exec_()
+    dlg.exec()
 
 def show_CPU(self):
     show_image_dialog(self, get_path('assets/res/台式CPU.jpg'), "台式CPU查看")
@@ -270,4 +274,3 @@ def show_CPUm(self):
 
 def show_GPUm(self):
     show_image_dialog(self, get_path('assets/res/笔记本GPU.jpg'), "笔记本GPU查看")
-

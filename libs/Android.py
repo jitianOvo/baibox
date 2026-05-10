@@ -1,13 +1,13 @@
 import os
 import subprocess
 from core_lib import get_path
-from PyQt5.QtCore import Qt
-from PyQt5.QtGui import QIcon, QFont
-from PyQt5.QtWidgets import (
+from PySide6.QtCore import Qt
+from PySide6.QtGui import QIcon, QFont
+from PySide6.QtWidgets import (
     QLabel, QMessageBox, QListWidget, QListWidgetItem, QDialog, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
     QCheckBox, QPushButton, QScrollArea
 )
-from PyQt5 import QtWidgets, QtGui, QtCore
+from PySide6 import QtWidgets, QtGui, QtCore
 # 窗口类
 
 # 镜像选择窗口
@@ -99,7 +99,7 @@ class CheckListDialog(QDialog):
         main_layout.addLayout(btn_bottom_layout)
 
         # 弹窗阻塞
-        self.exec_()
+        self.exec()
 
     # 确认
     def confirm(self):
@@ -243,8 +243,8 @@ class ConfirmDialog(QtWidgets.QMessageBox):
         super().__init__(parent)
 
         # 启用高DPI缩放和平滑图标
-        QtWidgets.QApplication.setAttribute(QtCore.Qt.AA_EnableHighDpiScaling)
-        QtWidgets.QApplication.setAttribute(QtCore.Qt.AA_UseHighDpiPixmaps)
+        set_qt_application_attribute("AA_EnableHighDpiScaling")
+        set_qt_application_attribute("AA_UseHighDpiPixmaps")
 
         self.setWindowTitle(title)
         self.setText(text)
@@ -312,30 +312,50 @@ class ConfirmDialog(QtWidgets.QMessageBox):
         """)
 
     def exec_confirm(self):
-        self.exec_()
+        self.exec()
         return self.clickedButton() == self.btn_yes
 
 
 
 def open_scrcpy(self):
     dialog = QDialog(self)
-    dialog.setWindowTitle("可爱的选择框")
-    dialog.setFixedSize(300, 200)
+    dialog.setWindowTitle("投屏方式选择")
+
+    if self and not self.windowIcon().isNull():
+        dialog.setWindowIcon(self.windowIcon())
+
+    screen = dialog.screen() or QtWidgets.QApplication.primaryScreen()
+    if screen:
+        available = screen.availableGeometry()
+        scale = min(max(available.height() / 1080, 0.85), 1.05)
+        dialog_width = max(320, min(420, available.width() - 120))
+        dialog_height = max(220, min(280, available.height() - 140))
+    else:
+        scale = 1.0
+        dialog_width, dialog_height = 360, 240
+
+    dialog.resize(dialog_width, dialog_height)
+    dialog.setMinimumSize(320, 220)
 
     layout = QVBoxLayout(dialog)
+    layout.setContentsMargins(20, 18, 20, 18)
+    layout.setSpacing(12)
 
     title = QLabel("请选择投屏方式:")
-    title.setStyleSheet("font-size: 16px; font-weight: bold; margin-bottom: 20px;")
+    title.setFont(QFont("Microsoft YaHei UI", max(13, int(round(15 * scale))), QFont.Bold))
+    title.setWordWrap(True)
+    title.setStyleSheet("margin-bottom: 6px;")
     layout.addWidget(title)
 
+    button_font = QFont("Microsoft YaHei UI", max(11, int(round(13 * scale))))
+    button_min_height = max(48, int(round(54 * scale)))
     button_style = """
     QPushButton {
         background-color: #4CAF50;
         border: none;
         color: white;
-        padding: 15px 32px;
-        font-size: 16px;
-        margin: 10px 2px;
+        padding: 8px 18px;
+        margin: 4px 0px;
         border-radius: 8px;
     }
     QPushButton:hover {
@@ -361,17 +381,25 @@ def open_scrcpy(self):
 
     # 按钮1
     button1 = QPushButton("有线投屏（带音频）")
+    button1.setFont(button_font)
+    button1.setMinimumHeight(button_min_height)
+    button1.setCursor(Qt.PointingHandCursor)
     button1.setStyleSheet(button_style)
     button1.clicked.connect(lambda: run_scrcpy())
     layout.addWidget(button1)
 
     # 按钮2
     button2 = QPushButton("有线投屏（不投音频）")
+    button2.setFont(button_font)
+    button2.setMinimumHeight(button_min_height)
+    button2.setCursor(Qt.PointingHandCursor)
     button2.setStyleSheet(button_style)
     button2.clicked.connect(lambda: run_scrcpy(["--no-audio"]))
     layout.addWidget(button2)
 
-    dialog.exec_()
+    layout.addStretch()
+
+    dialog.exec()
 
 def on_choose_devices_clicked(self):
     adb_get_devices()  # 每次点击按钮时动态刷新
@@ -538,7 +566,7 @@ def on_choose_devices_clicked(self):
         btn.clicked.connect(lambda _, d=dev: choose_device(d))
         layout.addWidget(btn)
 
-    dialog.exec_()
+    dialog.exec()
 
 def open_adb(self):
     subprocess.Popen(['cmd.exe', '/k', get_path("tools/adb-fastboot/打开CMD命令行.bat")],
@@ -569,7 +597,7 @@ def backup_IMG(self):
     btn_full = box.addButton("防格机备份", QMessageBox.AcceptRole)
     btn_patch = box.addButton("面具修补备份", QMessageBox.ActionRole)
     btn_cancel = box.addButton("取消", QMessageBox.RejectRole)
-    box.exec_()
+    box.exec()
     clicked = box.clickedButton()
 
     #使用此函数先进行设备有无连接的判断
@@ -701,7 +729,7 @@ def flash_boot(self):
     btn_boot_B = box.addButton("刷入init_boot_b", QMessageBox.ActionRole)
     btn_boot_C = box.addButton("手动刷入", QMessageBox.ActionRole)
     btn_cancel = box.addButton("取消", QMessageBox.RejectRole)
-    box.exec_()
+    box.exec()
     clicked = box.clickedButton()
     if clicked == btn_boot_A:
         result = fastboot_commander('flash init_boot_a D:/init_boot_a.img')
@@ -730,7 +758,7 @@ def flash_boot(self):
 
 def install_apks(preselect_list=None):
     dlg = ApkInstallWindow(get_path("tools/android"), get_path("tools/adb-fastboot/adb.exe"), preselect_list)
-    dlg.exec_()
+    dlg.exec()
 
 
 def install_environment_apks(self):
@@ -770,7 +798,7 @@ def Leetiaotiao(self):
 def send_files(preselect_list=None):
 
     dlg = FileSendWindow(get_path("tools/android"), get_path("tools/adb-fastboot/adb.exe"), preselect_list)
-    dlg.exec_()
+    dlg.exec()
 
 
 def send_al_environment_files(self):

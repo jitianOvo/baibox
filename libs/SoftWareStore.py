@@ -1,314 +1,445 @@
-import os,re,requests,subprocess,sys
-from PyQt5.QtCore import Qt, QThread, pyqtSignal, QSize
-from PyQt5.QtGui import QFont, QPixmap, QIcon
-from PyQt5.QtWidgets import (QDialog, QVBoxLayout, QLabel, QPushButton,
-                             QLineEdit, QListWidget, QListWidgetItem, QMessageBox,
-                             QHBoxLayout, QProgressBar, QFrame)
+import os
+import re
+import shutil
+import subprocess
+import sys
+
+import requests
+from PySide6.QtCore import Qt, QThread, Signal, QSize
+from PySide6.QtGui import QFont, QIcon, QPixmap
+from PySide6.QtWidgets import (
+    QDialog,
+    QFrame,
+    QHBoxLayout,
+    QLabel,
+    QLineEdit,
+    QListWidget,
+    QListWidgetItem,
+    QMessageBox,
+    QPushButton,
+    QProgressBar,
+    QVBoxLayout,
+)
+
+from core_lib import get_path
+
+ARIA2_API_DIR = get_path("assets/aira2c")
+if ARIA2_API_DIR not in sys.path:
+    sys.path.insert(0, ARIA2_API_DIR)
+from aria2c_api import aria2_download
+
+
+def _build_message_box(parent, title, text, level="info", buttons=None):
+    box = QMessageBox(parent)
+    box.setWindowTitle(title)
+    box.setText(text)
+    box.setIcon(
+        QMessageBox.Information
+        if level == "info"
+        else QMessageBox.Warning
+        if level == "warn"
+        else QMessageBox.Critical
+    )
+    box.setStyleSheet(
+        """
+        QMessageBox {
+            background-color: #f7f9fc;
+        }
+        QLabel {
+            color: #1f2937;
+            min-width: 280px;
+            font-size: 13px;
+        }
+        QPushButton {
+            min-width: 86px;
+            min-height: 32px;
+            border-radius: 8px;
+            background-color: #eef2f7;
+            border: 1px solid #d6deea;
+            color: #1f2937;
+            padding: 4px 10px;
+        }
+        QPushButton:hover {
+            background-color: #e6edf8;
+        }
+        """
+    )
+    if buttons:
+        for btn_text, role in buttons:
+            box.addButton(btn_text, role)
+    else:
+        box.setStandardButtons(QMessageBox.Ok)
+    return box
+
+
+def _safe_open_path(target):
+    try:
+        if sys.platform == "win32":
+            os.startfile(target)
+        elif sys.platform == "darwin":
+            subprocess.call(["open", target])
+        else:
+            subprocess.call(["xdg-open", target])
+        return None
+    except Exception as exc:
+        return str(exc)
+
+
+class SearchThread(QThread):
+    search_finished = Signal(list)
+    search_error = Signal(str)
+    search_status = Signal(str)
+
+    def __init__(self, keyword, headers, headers2):
+        super().__init__()
+        self.keyword = keyword
+        self.headers = headers
+        self.headers2 = headers2
+
+    def run(self):
+        try:
+            self.search_status.emit("正在检索软件列表...")
+
+            params = {
+                "type": "search",
+                "callback": "searchCallback",
+                "keyword": self.keyword,
+                "page": "1",
+                "pernum": "50",
+                "more": "0",
+            }
+
+            response = requests.get(
+                "https://luban.m.qq.com/api/public/software-manager/searchcgi",
+                headers=self.headers,
+                params=params,
+                timeout=12,
+            )
+            response.raise_for_status()
+            label = re.findall(r"{.*?}", response.text)
+
+            ids = []
+            for one in label:
+                soft_id = re.findall(r'"SoftID":(\d+)', one)
+                if soft_id:
+                    ids.append(soft_id[0])
+
+            results = []
+            total = len(ids)
+            for idx, sid in enumerate(ids):
+                self.search_status.emit(f"正在获取详情 {idx + 1}/{total}")
+
+                data = {"cmdid": "3318", "jprxReq[req][soft_id_list][]": sid}
+                response2 = requests.post(
+                    "https://luban.m.qq.com/api/public/software-manager/softwareProxy",
+                    headers=self.headers2,
+                    data=data,
+                    timeout=12,
+                ).text
+
+                soft_name = re.findall(r'"display_name":"(.*?)"', response2)
+                ver_name = re.findall(r'"ver_name":"(.*?)"', response2)
+                file_size = re.findall(r'"file_size":"(\d+)"', response2)
+                file_name = re.findall(r'"file_name":"(.*?)"', response2)
+                publish_date = re.findall(r'"publish_date":"(.*?)"', response2)
+                download_url = re.findall(r'"download_url":"(.*?)"', response2)
+                soft_logo = re.findall(r'"Logo48File":"(.*?)"', response2)
+
+                if not soft_name or not download_url:
+                    continue
+
+                icon_url = None
+                if soft_logo:
+                    logo = soft_logo[0]
+                    icon_url = logo if logo.startswith("http") else f"https://{logo.lstrip('/')}"
+
+                size_mb = 0
+                if file_size:
+                    try:
+                        size_mb = round(float(file_size[0]) / 1024 / 1024, 2)
+                    except Exception:
+                        size_mb = 0
+
+                results.append(
+                    {
+                        "name": soft_name[0],
+                        "version": ver_name[0] if ver_name else "未知版本",
+                        "size": size_mb,
+                        "date": publish_date[0] if publish_date else "未知日期",
+                        "url": download_url[0],
+                        "filename": file_name[0] if file_name else f"{soft_name[0]}.exe",
+                        "icon_url": icon_url,
+                    }
+                )
+
+            self.search_finished.emit(results)
+        except Exception as exc:
+            self.search_error.emit(str(exc))
+
+
+class IconLoadThread(QThread):
+    loaded = Signal(QListWidgetItem, QIcon)
+
+    def __init__(self, targets):
+        super().__init__()
+        self.targets = targets
+
+    def run(self):
+        session = requests.Session()
+        session.headers.update(
+            {
+                "User-Agent": (
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                    "(KHTML, like Gecko) Chrome/139.0.0.0 Safari/537.36 Edg/139.0.0.0"
+                )
+            }
+        )
+        for item, icon_url in self.targets:
+            if not icon_url:
+                continue
+            try:
+                resp = session.get(icon_url, timeout=8)
+                resp.raise_for_status()
+                pix = QPixmap()
+                if pix.loadFromData(resp.content):
+                    self.loaded.emit(item, QIcon(pix))
+            except Exception:
+                continue
+
+
+class DownloadThread(QThread):
+    progress = Signal(int)
+    finished = Signal(str)
+    error = Signal(str)
+
+    def __init__(self, url, save_dir, filename):
+        super().__init__()
+        self.url = url
+        self.save_dir = save_dir
+        self.filename = filename
+        self.save_path = os.path.join(save_dir, filename)
+
+    def run(self):
+        try:
+            os.makedirs(self.save_dir, exist_ok=True)
+            self.progress.emit(5)
+            aria2_download(
+                url=self.url,
+                threads=16,
+                filename=self.filename,
+                path=self.save_dir,
+                min_split_size="1M",
+            )
+            self.progress.emit(100)
+            if not os.path.exists(self.save_path):
+                raise RuntimeError("下载任务已结束，但未检测到目标文件。")
+            self.finished.emit(self.save_path)
+        except Exception as exc:
+            self.error.emit(str(exc))
+
+
 def SoftWareStore(self):
     self.search_threads = []
     self.download_threads = []
+    self.icon_threads = []
 
-    # 创建对话框
     dialog = QDialog(self)
-    dialog.setWindowTitle("喵~ | 这是一个可爱的软件中心")
-    dialog.setFixedSize(600, 750)
-    dialog.setStyleSheet("""
+    dialog.setWindowTitle("软件中心")
+    dialog.resize(690, 760)
+    if self and not self.windowIcon().isNull():
+        dialog.setWindowIcon(self.windowIcon())
+    dialog.setStyleSheet(
+        """
         QDialog {
-            background: qlineargradient(x1:0, y1:0, x2:1, y2:1, 
-                        stop:0 #667eea, stop:1 #764ba2);
-            border-radius: 15px;
+            background-color: #f3f6fb;
         }
-        QLabel {
-            color: white;
-            font-family: 'Microsoft YaHei', Arial;
+        QFrame#Card {
+            background-color: #ffffff;
+            border: 1px solid #dfe7f3;
+            border-radius: 12px;
+        }
+        QLabel#MainTitle {
+            color: #111827;
+            font-size: 22px;
+            font-weight: 700;
+        }
+        QLabel#SubTitle {
+            color: #64748b;
+            font-size: 12px;
+        }
+        QLabel#StatusLabel {
+            color: #334155;
+            font-size: 12px;
         }
         QLineEdit {
-            background-color: rgba(255, 255, 255, 0.9);
-            border: 2px solid rgba(255, 255, 255, 0.3);
-            border-radius: 25px;
-            padding: 12px 20px;
-            font-size: 14px;
-            color: #333;
-        }
-        QLineEdit:focus {
-            border: 2px solid #4CAF50;
-            background-color: white;
-        }
-        QPushButton {
-            background: qlineargradient(x1:0, y1:0, x2:1, y2:0, 
-                        stop:0 #4CAF50, stop:1 #45a049);
-            color: white;
-            border: none;
-            border-radius: 25px;
-            padding: 12px 24px;
-            font-size: 14px;
-            font-weight: bold;
-            font-family: 'Microsoft YaHei';
-        }
-        QPushButton:hover {
-            background: qlineargradient(x1:0, y1:0, x2:1, y2:0, 
-                        stop:0 #45a049, stop:1 #3d8b40);
-        }
-        QPushButton:pressed {
-            background: qlineargradient(x1:0, y1:0, x2:1, y2:0, 
-                        stop:0 #3d8b40, stop:1 #2e7d32);
-        }
-        QPushButton:disabled {
-            background: #cccccc;
-            color: #666666;
-        }
-        QListWidget {
-            background-color: rgba(255, 255, 255, 0.95);
-            border: none;
-            border-radius: 15px;
-            padding: 10px;
-        }
-        QListWidget::item {
-            background-color: white;
-            border: 1px solid #e0e0e0;
-            border-radius: 10px;
-            margin: 5px;
-            padding: 15px;
+            background-color: #f8fafc;
+            border: 1px solid #dbe4f0;
+            border-radius: 9px;
+            padding: 8px 11px;
+            color: #111827;
             font-size: 13px;
         }
-        QListWidget::item:selected {
-            background: qlineargradient(x1:0, y1:0, x2:1, y2:0, 
-                        stop:0 #4CAF50, stop:1 #45a049);
-            color: white;
+        QLineEdit:focus {
+            border: 1px solid #2563eb;
+            background-color: #ffffff;
         }
-        QListWidget::item:hover {
-            background-color: #f5f5f5;
-            border: 1px solid #4CAF50;
-        }
-        QProgressBar {
-            border: none;
-            border-radius: 10px;
-            background-color: rgba(255, 255, 255, 0.3);
-            text-align: center;
-            color: white;
-            font-weight: bold;
-        }
-        QProgressBar::chunk {
-            background: qlineargradient(x1:0, y1:0, x2:1, y2:0, 
-                        stop:0 #4CAF50, stop:1 #45a049);
-            border-radius: 10px;
-        }
-    """)
-
-    layout = QVBoxLayout(dialog)
-    layout.setSpacing(20)
-    layout.setContentsMargins(30, 30, 30, 30)
-
-    # 标题区域
-    # 标题区域（带圆角白色背景）
-    title_frame = QFrame()
-    title_frame.setStyleSheet("""
-        QFrame {
-            background-color: white;
-            border-radius: 15px;
-            padding: 3px;
-        }
-    """)
-    title_layout = QVBoxLayout(title_frame)
-
-    main_title = QLabel("软件中心")
-    main_title.setFont(QFont("Microsoft YaHei", 24, QFont.Bold))
-    main_title.setAlignment(Qt.AlignCenter)
-    main_title.setStyleSheet("""
-        QLabel {
-            font-weight: bold;
-            font-size: 28pt;
-            color: qlineargradient(
-                x1:0, y1:0, x2:1, y2:0,
-                stop:0 #4A90E2, stop:1 #9B59B6
-            );
-        }
-    """)
-
-    subtitle = QLabel("妈妈再也不用担心电脑乱种下崽器了~")
-    subtitle.setFont(QFont("Microsoft YaHei", 12))
-    subtitle.setAlignment(Qt.AlignCenter)
-    subtitle.setStyleSheet("""
-        QLabel {
-            color: qlineargradient(
-                x1:0, y1:0, x2:1, y2:0,
-                stop:0 #1e90ff, stop:1 #8a2be2
-            );
-            font-weight: bold;
-        }
-    """)
-
-    title_layout.addWidget(main_title)
-    title_layout.addWidget(subtitle)
-    layout.addWidget(title_frame)
-
-    # 搜索区域
-    search_frame = QFrame()
-    search_frame.setStyleSheet("""
-        QFrame {
-            background-color: white;
-            border-radius: 15px;
-            padding: 6px 15px;  /* 修改这里：上下8px，左右15px */
-        }
-    """)
-    search_layout = QHBoxLayout(search_frame)
-    search_box = QLineEdit()
-    search_box.setPlaceholderText("🔍 输入软件名称，如：QQ、微信、Chrome...")
-    search_box.setFont(QFont("Microsoft YaHei", 12))
-
-    btn_search = QPushButton("搜索")
-    btn_search.setFixedSize(120, 40)
-
-    btn_search.setStyleSheet("""
         QPushButton {
-            background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #4CAF50, stop:1 #45a049);
-            color: white;
-            border: none;
-            border-radius: 20px;
-            font-size: 14px;
-            font-weight: bold;
-            font-family: 'Microsoft YaHei';
+            background-color: #eef3fb;
+            border: 1px solid #d4deee;
+            border-radius: 9px;
+            min-height: 34px;
+            padding: 6px 12px;
+            color: #1f2937;
+            font-weight: 600;
         }
         QPushButton:hover {
-            background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #45a049, stop:1 #3d8b40);
+            background-color: #e6eefb;
         }
-        QPushButton:pressed {
-            background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #3d8b40, stop:1 #2e7d32);
+        QPushButton:disabled {
+            color: #94a3b8;
+            background-color: #f1f5f9;
         }
-    """)
-
-    search_layout.addWidget(search_box, 4)
-    search_layout.addWidget(btn_search, 1)
-
-    layout.addWidget(search_frame)
-
-    # 搜索进度条
-    search_progress = QProgressBar()
-    search_progress.setVisible(False)
-    search_progress.setRange(0, 0)
-    search_progress.setFixedHeight(8)
-    layout.addWidget(search_progress)
-
-    # 结果列表
-    result_list = QListWidget()
-    result_list.setMinimumHeight(300)
-    search_box.setStyleSheet("""
-        background-color: #f5f5f5;
-        border-radius: 12px;
-        padding: 8px 12px;
-        font-size: 14px;
-    """)
-
-    result_list.setStyleSheet("""
+        QPushButton[role="primary"] {
+            background-color: #2563eb;
+            border-color: #2563eb;
+            color: white;
+        }
+        QPushButton[role="primary"]:hover {
+            background-color: #1d4ed8;
+        }
+        QPushButton[role="danger"] {
+            background-color: #ef4444;
+            border-color: #ef4444;
+            color: white;
+        }
+        QPushButton[role="danger"]:hover {
+            background-color: #dc2626;
+        }
         QListWidget {
-            background-color: #fafafa;
-            border: none;
+            background-color: #fbfdff;
+            border: 1px solid #dfe7f3;
+            border-radius: 10px;
+            outline: none;
+            font-size: 13px;
+            color: #0f172a;
+        }
+        QListWidget::item {
+            padding: 10px 8px;
+            border-bottom: 1px solid #edf2fb;
         }
         QListWidget::item:selected {
-            background: #d0ebff;
-            color: #333333;
-            outline: none;
+            background-color: #e7f0ff;
+            color: #0f172a;
         }
-        QListWidget:focus {
-            outline: 0;
+        QProgressBar {
+            border: 1px solid #dbe4f0;
+            border-radius: 8px;
+            background-color: #f8fafc;
+            text-align: center;
+            color: #334155;
+            min-height: 18px;
         }
-        QListWidget::item:focus {
-            outline: 0;
+        QProgressBar::chunk {
+            background-color: #2563eb;
+            border-radius: 7px;
         }
-
         QScrollBar:vertical {
-            background: #f0f0f0;
-            width: 12px;
-            margin: 0px 0px 0px 0px;
-            border-radius: 6px;
+            background: transparent;
+            width: 11px;
+            margin: 2px 2px 2px 0;
         }
         QScrollBar::handle:vertical {
-            background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                        stop:0 #4a90e2, stop:1 #6a1b9a);
-            border-radius: 6px;
-            min-height: 20px;
-        }
-        QScrollBar::handle:vertical:hover {
-            background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                        stop:0 #6a1b9a, stop:1 #4a90e2);
+            background: #c5d1e4;
+            min-height: 28px;
+            border-radius: 5px;
         }
         QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
             height: 0;
         }
+        QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {
+            background: transparent;
+        }
+        """
+    )
 
-        QScrollBar:horizontal {
-            background: #f0f0f0;
-            height: 12px;
-            border-radius: 6px;
-        }
-        QScrollBar::handle:horizontal {
-            background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
-                        stop:0 #4a90e2, stop:1 #6a1b9a);
-            border-radius: 6px;
-            min-width: 20px;
-        }
-        QScrollBar::handle:horizontal:hover {
-            background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
-                        stop:0 #6a1b9a, stop:1 #4a90e2);
-        }
-        QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {
-            width: 0;
-        }
-    """)
-    layout.addWidget(result_list)
+    layout = QVBoxLayout(dialog)
+    layout.setSpacing(10)
+    layout.setContentsMargins(16, 16, 16, 16)
 
-    # 下载进度条
+    title_card = QFrame()
+    title_card.setObjectName("Card")
+    title_layout = QVBoxLayout(title_card)
+    title_layout.setContentsMargins(14, 12, 14, 12)
+    title_layout.setSpacing(4)
+    title = QLabel("软件中心")
+    title.setObjectName("MainTitle")
+    title.setAlignment(Qt.AlignCenter)
+    subtitle = QLabel("输入软件名称后搜索，选中即可高速下载到本地")
+    subtitle.setObjectName("SubTitle")
+    subtitle.setAlignment(Qt.AlignCenter)
+    title_layout.addWidget(title)
+    title_layout.addWidget(subtitle)
+    layout.addWidget(title_card)
+
+    search_card = QFrame()
+    search_card.setObjectName("Card")
+    search_layout = QVBoxLayout(search_card)
+    search_layout.setContentsMargins(12, 10, 12, 10)
+    search_layout.setSpacing(8)
+
+    row = QHBoxLayout()
+    row.setSpacing(8)
+    search_box = QLineEdit()
+    search_box.setPlaceholderText("输入软件名称，例如：QQ、微信、Chrome")
+    search_box.setFont(QFont("Microsoft YaHei UI", 11))
+    btn_search = QPushButton("搜索")
+    btn_search.setProperty("role", "primary")
+    btn_search.setFixedWidth(116)
+    row.addWidget(search_box, 1)
+    row.addWidget(btn_search)
+    search_layout.addLayout(row)
+
+    status_label = QLabel("状态：等待搜索")
+    status_label.setObjectName("StatusLabel")
+    search_layout.addWidget(status_label)
+
+    search_progress = QProgressBar()
+    search_progress.setVisible(False)
+    search_progress.setRange(0, 0)
+    search_progress.setFormat("正在查询...")
+    search_layout.addWidget(search_progress)
+    layout.addWidget(search_card)
+
+    result_list = QListWidget()
+    result_list.setIconSize(QSize(36, 36))
+    result_list.setMinimumHeight(350)
+    layout.addWidget(result_list, 1)
+
     download_progress = QProgressBar()
     download_progress.setVisible(False)
-    download_progress.setFixedHeight(25)
+    download_progress.setValue(0)
     layout.addWidget(download_progress)
 
-    # 按钮区域
-    button_frame = QFrame()
-    button_frame.setStyleSheet("""
-        QFrame {
-            background-color: white;
-            border-radius: 15px;
-            padding: 8px;
-        }
-    """)
-    button_layout = QHBoxLayout(button_frame)
-    btn_download = QPushButton("📥 下载选中")
-    btn_view_files = QPushButton("📁 查看下载")
-    btn_clear_cache = QPushButton("🗑️ 清空缓存")
+    button_card = QFrame()
+    button_card.setObjectName("Card")
+    button_layout = QHBoxLayout(button_card)
+    button_layout.setContentsMargins(10, 8, 10, 8)
+    button_layout.setSpacing(8)
 
-    btn_view_files.setStyleSheet("""
-        QPushButton {
-            background: qlineargradient(x1:0, y1:0, x2:1, y2:0, 
-                        stop:0 #2196F3, stop:1 #1976D2);
-        }
-        QPushButton:hover {
-            background: qlineargradient(x1:0, y1:0, x2:1, y2:0, 
-                        stop:0 #1976D2, stop:1 #1565C0);
-        }
-    """)
-
-    btn_clear_cache.setStyleSheet("""
-        QPushButton {
-            background: qlineargradient(x1:0, y1:0, x2:1, y2:0, 
-                        stop:0 #FF5722, stop:1 #D84315);
-        }
-        QPushButton:hover {
-            background: qlineargradient(x1:0, y1:0, x2:1, y2:0, 
-                        stop:0 #D84315, stop:1 #BF360C);
-        }
-    """)
+    btn_download = QPushButton("下载选中")
+    btn_download.setProperty("role", "primary")
+    btn_view_files = QPushButton("打开下载目录")
+    btn_clear_cache = QPushButton("清空下载缓存")
+    btn_clear_cache.setProperty("role", "danger")
 
     button_layout.addWidget(btn_download)
     button_layout.addWidget(btn_view_files)
     button_layout.addWidget(btn_clear_cache)
-    layout.addWidget(button_frame)
+    layout.addWidget(button_card)
 
-    # 下载目录
-    save_dir = os.path.join(os.path.expanduser('~'), "PyCache", "SoftWare")
+    save_dir = os.path.join(os.path.expanduser("~"), "PyCache", "SoftWare")
     os.makedirs(save_dir, exist_ok=True)
 
-    # 请求头
     headers2 = {
         "Accept": "*/*",
         "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8,en-GB;q=0.7,en-US;q=0.6",
@@ -316,408 +447,185 @@ def SoftWareStore(self):
         "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
         "Origin": "https://pc.qq.com",
         "Referer": "https://pc.qq.com/",
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/139.0.0.0 Safari/537.36 Edg/139.0.0.0",
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/139.0.0.0 Safari/537.36 Edg/139.0.0.0"
+        ),
     }
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/139.0.0.0 Safari/537.36 Edg/139.0.0.0",
-    }
+    headers = {"User-Agent": headers2["User-Agent"]}
 
-    # 搜索线程类
-    class SearchThread(QThread):
-        search_finished = pyqtSignal(list)
-        search_error = pyqtSignal(str)
-        search_progress_update = pyqtSignal(str)
-
-        def __init__(self, keyword):
-            super().__init__()
-            self.keyword = keyword
-
-        def run(self):
-            try:
-                self.search_progress_update.emit("正在搜索...")
-
-                params = {
-                    "type": "search",
-                    "callback": "searchCallback",
-                    "keyword": self.keyword,
-                    "page": "1",
-                    "pernum": "50",
-                    "more": "0"
-                }
-
-                self.search_progress_update.emit("发送请求...")
-                response = requests.get("https://luban.m.qq.com/api/public/software-manager/searchcgi",
-                                        headers=headers, params=params, timeout=10)
-
-                self.search_progress_update.emit("解析结果...")
-                label = re.findall(r"{.*?}", response.text)
-                ids = []
-                for i in label:
-                    SoftId = re.findall(r'"SoftID":(\d+)', i)
-                    if SoftId:
-                        ids.append(SoftId[0])
-
-                results = []
-                total_ids = len(ids)
-
-                for idx, ID in enumerate(ids):
-                    self.search_progress_update.emit(f"获取软件信息 {idx + 1}/{total_ids}")
-
-                    data = {"cmdid": "3318", "jprxReq[req][soft_id_list][]": ID}
-                    response2 = requests.post("https://luban.m.qq.com/api/public/software-manager/softwareProxy",
-                                              headers=headers2, data=data, timeout=10).text
-
-                    SoftName = re.findall(r'"display_name":"(.*?)"', response2)
-                    ver_name = re.findall(r'"ver_name":"(.*?)"', response2)
-                    file_size = re.findall(r'"file_size":"(\d+)"', response2)
-                    file_name = re.findall(r'"file_name":"(.*?)"', response2)
-                    publish_date = re.findall(r'"publish_date":"(.*?)"', response2)
-                    download_url = re.findall(r'"download_url":"(.*?)"', response2)
-                    SoftLogo = re.findall(r'"Logo48File":"(.*?)"', response2)
-                    icon_url = f"https://{SoftLogo[0]}" if SoftLogo else None
-
-                    if SoftName and download_url:
-                        size_mb = round((float(file_size[0]) / 1024 / 1024), 2) if file_size else 0
-                        results.append({
-                            'name': SoftName[0],
-                            'version': ver_name[0] if ver_name else 'Unknown',
-                            'size': size_mb,
-                            'date': publish_date[0] if publish_date else 'Unknown',
-                            'url': download_url[0],
-                            'filename': file_name[0] if file_name else f"{SoftName[0]}.exe",
-                            'icon_url': icon_url
-                        })
-
-                self.search_finished.emit(results)
-
-            except Exception as e:
-                self.search_error.emit(str(e))
-
-    # 下载线程类
-    class DownloadThread(QThread):
-        download_progress = pyqtSignal(int)
-        download_finished = pyqtSignal(str)
-        download_error = pyqtSignal(str)
-
-        def __init__(self, url, save_path):
-            super().__init__()
-            self.url = url
-            self.save_path = save_path
-
-        def run(self):
-            try:
-                with requests.get(self.url, stream=True, timeout=30) as r:
-                    r.raise_for_status()
-                    total = int(r.headers.get('content-length', 0))
-                    downloaded = 0
-                    with open(self.save_path, "wb") as f:
-                        for chunk in r.iter_content(8192):
-                            if chunk:
-                                f.write(chunk)
-                                downloaded += len(chunk)
-                                if total > 0:
-                                    self.download_progress.emit(int(downloaded * 100 / total))
-                self.download_finished.emit(self.save_path)
-            except Exception as e:
-                self.download_error.emit(str(e))
-
-    # 搜索函数
     def do_search():
         keyword = search_box.text().strip()
         if not keyword:
-            msg_box = QMessageBox(dialog)
-            msg_box.setWindowTitle("⚠️ 提示")
-            msg_box.setTextFormat(Qt.RichText)
-            msg_box.setText('<span style="color:red;">请输入搜索关键词！</span>')
-            msg_box.setStyleSheet("""
-                QMessageBox {
-                    background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
-                                stop:0 #80c0ff, stop:1 #a080ff);
-                    border-radius: 10px;
-                }
-                QLabel {
-                    background-color: transparent;
-                }
-            """)
-            msg_box.exec_()
+            _build_message_box(dialog, "提示", "请输入搜索关键词。", level="warn").exec()
             return
 
         result_list.clear()
+        status_label.setText("状态：正在搜索...")
         search_progress.setVisible(True)
         btn_search.setEnabled(False)
-        btn_search.setText("🔍 搜索中...")
+        btn_search.setText("搜索中")
 
-        search_thread = SearchThread(keyword)
+        search_thread = SearchThread(keyword, headers, headers2)
         self.search_threads.append(search_thread)
+
+        def on_search_status(text):
+            status_label.setText(f"状态：{text}")
 
         def on_search_finished(results):
             search_progress.setVisible(False)
             btn_search.setEnabled(True)
-            btn_search.setText("🚀 搜索")
+            btn_search.setText("搜索")
 
+            icon_targets = []
             for result in results:
-                item_text = f"{result['name']}\n🏷️ 版本: {result['version']} | 📏 大小: {result['size']}MB | 📅 发布: {result['date']}"
-                item = QListWidgetItem(item_text)
-
-                icon_url = result.get('icon_url')
-                if icon_url:
-                    try:
-                        from urllib.request import urlopen
-                        data = urlopen(icon_url).read()
-                        pixmap = QPixmap()
-                        pixmap.loadFromData(data)
-                        item.setIcon(QIcon(pixmap))
-                    except Exception as e:
-                        print("图标加载失败:", e)
-
-                item.setData(1000, result['url'])
-                item.setData(1001, result['filename'])
-                item.setSizeHint(QSize(0, 80))
+                name = result["name"]
+                version = result["version"]
+                size = result["size"]
+                date = result["date"]
+                text = f"{name}\n版本：{version}   大小：{size} MB   发布：{date}"
+                item = QListWidgetItem(text)
+                item.setData(Qt.UserRole, result["url"])
+                item.setData(Qt.UserRole + 1, result["filename"])
+                item.setData(Qt.UserRole + 2, result["icon_url"])
+                item.setSizeHint(QSize(0, 66))
                 result_list.addItem(item)
 
-            if not results:
-                no_result = QListWidgetItem("😔 未找到相关软件，请尝试其他关键词")
-                no_result.setSizeHint(QSize(0, 60))
-                result_list.addItem(no_result)
+                icon_url = result.get("icon_url")
+                if icon_url:
+                    icon_targets.append((item, icon_url))
 
-            self.search_threads.remove(search_thread)
+            if icon_targets:
+                icon_thread = IconLoadThread(icon_targets)
+                self.icon_threads.append(icon_thread)
+
+                def on_icon_loaded(item, icon):
+                    item.setIcon(icon)
+
+                def on_icon_finished():
+                    if icon_thread in self.icon_threads:
+                        self.icon_threads.remove(icon_thread)
+
+                icon_thread.loaded.connect(on_icon_loaded)
+                icon_thread.finished.connect(on_icon_finished)
+                icon_thread.start()
+
+            if not results:
+                result_list.addItem(QListWidgetItem("未找到相关软件，请尝试其他关键词。"))
+                status_label.setText("状态：未找到匹配结果")
+            else:
+                status_label.setText(f"状态：已找到 {len(results)} 条结果")
+
+            if search_thread in self.search_threads:
+                self.search_threads.remove(search_thread)
 
         def on_search_error(error):
             search_progress.setVisible(False)
             btn_search.setEnabled(True)
-            btn_search.setText("🚀 搜索")
-            QMessageBox.critical(dialog, "❌ 错误", f"搜索失败: {error}")
-            self.search_threads.remove(search_thread)
+            btn_search.setText("搜索")
+            status_label.setText("状态：搜索失败")
+            _build_message_box(dialog, "搜索失败", f"搜索失败：{error}", level="error").exec()
+            if search_thread in self.search_threads:
+                self.search_threads.remove(search_thread)
 
+        search_thread.search_status.connect(on_search_status)
         search_thread.search_finished.connect(on_search_finished)
         search_thread.search_error.connect(on_search_error)
-
         search_thread.start()
 
-    # 下载函数
     def download_selected():
         item = result_list.currentItem()
-        if not item or not item.data(1000):
-            msg_box = QMessageBox(dialog)
-            msg_box.setWindowTitle("⚠️ 提示")
-            msg_box.setTextFormat(Qt.RichText)
-            msg_box.setText('<span style="color:red;">请先选择一个软件！</span>')
-            msg_box.setStandardButtons(QMessageBox.Ok)
-
-            msg_box.setStyleSheet("""
-                QMessageBox {
-                    background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
-                                stop:0 #80c0ff, stop:1 #a080ff);
-                    border-radius: 12px;
-                }
-                QLabel {
-                    background-color: transparent;
-                }
-                QPushButton {
-                    min-width: 80px;
-                    padding: 6px;
-                    border-radius: 6px;
-                    font-weight: bold;
-                    color: white;
-                    background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
-                                stop:0 #4CAF50, stop:1 #45a049);
-                }
-                QPushButton:hover {
-                    background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
-                                stop:0 #45a049, stop:1 #3d8b40);
-                }
-                QPushButton:pressed {
-                    background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
-                                stop:0 #3d8b40, stop:1 #2e7d32);
-                }
-            """)
-
-            msg_box.exec_()
+        if not item or not item.data(Qt.UserRole):
+            _build_message_box(dialog, "提示", "请先在结果列表中选择一个软件。", level="warn").exec()
             return
 
-        url = item.data(1000)
-        fname = item.data(1001)
-        save_path = os.path.join(save_dir, fname)
+        url = item.data(Qt.UserRole)
+        filename = item.data(Qt.UserRole + 1)
 
         download_progress.setVisible(True)
+        download_progress.setValue(0)
         btn_download.setEnabled(False)
-        btn_download.setText("📥 下载中...")
+        btn_download.setText("下载中")
+        status_label.setText("状态：正在下载...")
 
-        download_thread = DownloadThread(url, save_path)
-        self.download_threads.append(download_thread)
+        thread = DownloadThread(url, save_dir, filename)
+        self.download_threads.append(thread)
 
-        def on_download_progress(value):
-            download_progress.setValue(value)
+        def on_progress(value):
+            download_progress.setValue(max(0, min(100, value)))
 
-        def on_download_finished(file_path):
+        def on_finished(file_path):
             download_progress.setVisible(False)
             btn_download.setEnabled(True)
-            btn_download.setText("📥 下载选中")
+            btn_download.setText("下载选中")
+            status_label.setText("状态：下载完成")
 
-            msg_box = QMessageBox(dialog)
-            msg_box.setWindowTitle("✅ 下载完成")
-            msg_box.setTextFormat(Qt.RichText)
-            msg_box.setText(f'<span style="color:red;">文件已下载到:{file_path}<br>是否立即打开？</span>')
-            msg_box.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
+            msg = _build_message_box(
+                dialog,
+                "下载完成",
+                f"文件已下载到：\n{file_path}\n\n是否立即打开文件？",
+                level="info",
+                buttons=[
+                    ("打开文件", QMessageBox.AcceptRole),
+                    ("稍后再说", QMessageBox.RejectRole),
+                ],
+            )
+            msg.exec()
+            clicked = msg.clickedButton()
+            if clicked and clicked.text() == "打开文件":
+                err = _safe_open_path(file_path)
+                if err:
+                    _build_message_box(dialog, "提示", f"无法打开文件：{err}", level="warn").exec()
 
-            msg_box.setStyleSheet("""
-                QMessageBox {
-                    background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
-                                stop:0 #80c0ff, stop:1 #a080ff);
-                    border-radius: 12px;
-                }
-                QLabel {
-                    background-color: transparent;
-                }
-                QPushButton {
-                    min-width: 80px;
-                    padding: 6px;
-                    border-radius: 6px;
-                    font-weight: bold;
-                    color: white;
-                    background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
-                                stop:0 #4CAF50, stop:1 #45a049);
-                }
-                QPushButton:hover {
-                    background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
-                                stop:0 #45a049, stop:1 #3d8b40);
-                }
-                QPushButton:pressed {
-                    background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
-                                stop:0 #3d8b40, stop:1 #2e7d32);
-                }
-            """)
+            if thread in self.download_threads:
+                self.download_threads.remove(thread)
 
-            reply = msg_box.exec_()
-
-            if reply == QMessageBox.Yes:
-                try:
-                    if sys.platform == "win32":
-                        os.startfile(file_path)
-                    elif sys.platform == "darwin":
-                        subprocess.call(["open", file_path])
-                    else:
-                        subprocess.call(["xdg-open", file_path])
-                except Exception as e:
-                    QMessageBox.warning(dialog, "⚠️ 提示", f"无法打开文件: {e}")
-
-            self.download_threads.remove(download_thread)
-
-        def on_download_error(error):
+        def on_error(error):
             download_progress.setVisible(False)
             btn_download.setEnabled(True)
-            btn_download.setText("📥 下载选中")
-            QMessageBox.critical(dialog, "❌ 错误", f"下载失败: {error}")
-            self.download_threads.remove(download_thread)
+            btn_download.setText("下载选中")
+            status_label.setText("状态：下载失败")
+            _build_message_box(dialog, "下载失败", f"下载失败：{error}", level="error").exec()
+            if thread in self.download_threads:
+                self.download_threads.remove(thread)
 
-        download_thread.download_progress.connect(on_download_progress)
-        download_thread.download_finished.connect(on_download_finished)
-        download_thread.download_error.connect(on_download_error)
-        download_thread.start()
+        thread.progress.connect(on_progress)
+        thread.finished.connect(on_finished)
+        thread.error.connect(on_error)
+        thread.start()
 
-    # 查看下载文件
     def view_downloaded_files():
-        try:
-            if sys.platform == "win32":
-                os.startfile(save_dir)
-            elif sys.platform == "darwin":
-                subprocess.call(["open", save_dir])
-            else:
-                subprocess.call(["xdg-open", save_dir])
-        except Exception as e:
-            QMessageBox.warning(dialog, "⚠️ 提示", f"无法打开文件夹: {e}")
+        err = _safe_open_path(save_dir)
+        if err:
+            _build_message_box(dialog, "提示", f"无法打开目录：{err}", level="warn").exec()
 
-    # 清空缓存
     def clear_cache():
-        msg_box = QMessageBox(dialog)
-        msg_box.setWindowTitle("🗑️ 确认删除")
-        msg_box.setTextFormat(Qt.RichText)
-        msg_box.setText('<span style="color:red;">确定要清空所有已下载的文件吗？<br>此操作不可撤销！</span>')
-        msg_box.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
+        msg = _build_message_box(
+            dialog,
+            "确认操作",
+            "确定要清空已下载缓存吗？此操作不可撤销。",
+            level="warn",
+            buttons=[
+                ("确认清空", QMessageBox.AcceptRole),
+                ("取消", QMessageBox.RejectRole),
+            ],
+        )
+        msg.exec()
+        clicked = msg.clickedButton()
+        if not clicked or clicked.text() != "确认清空":
+            return
+        try:
+            if os.path.exists(save_dir):
+                shutil.rmtree(save_dir)
+            os.makedirs(save_dir, exist_ok=True)
+            _build_message_box(dialog, "完成", "缓存已清空。", level="info").exec()
+        except Exception as exc:
+            _build_message_box(dialog, "清空失败", f"清空失败：{exc}", level="error").exec()
 
-        msg_box.setStyleSheet("""
-            QMessageBox {
-                background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
-                            stop:0 #80c0ff, stop:1 #a080ff);
-                border-radius: 12px;
-            }
-            QLabel {
-                background-color: transparent;
-            }
-            QPushButton {
-                min-width: 80px;
-                padding: 6px;
-                border-radius: 6px;
-                font-weight: bold;
-                color: white;
-                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
-                            stop:0 #4CAF50, stop:1 #45a049);
-            }
-            QPushButton:hover {
-                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
-                            stop:0 #45a049, stop:1 #3d8b40);
-            }
-            QPushButton:pressed {
-                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
-                            stop:0 #3d8b40, stop:1 #2e7d32);
-            }
-        """)
-
-        reply = msg_box.exec_()
-
-        if reply == QMessageBox.Yes:
-            try:
-                import shutil
-                if os.path.exists(save_dir):
-                    shutil.rmtree(save_dir)
-                    os.makedirs(save_dir, exist_ok=True)
-                msg_box = QMessageBox(dialog)
-                msg_box.setWindowTitle("✅ 完成")
-                msg_box.setTextFormat(Qt.RichText)
-                msg_box.setText('<span style="color:red;">缓存已清空！</span>')
-                msg_box.setStandardButtons(QMessageBox.Ok)
-
-                msg_box.setStyleSheet("""
-                    QMessageBox {
-                        background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
-                                    stop:0 #80c0ff, stop:1 #a080ff);
-                        border-radius: 12px;
-                    }
-                    QLabel {
-                        background-color: transparent;
-                    }
-                    QPushButton {
-                        min-width: 80px;
-                        padding: 6px;
-                        border-radius: 6px;
-                        font-weight: bold;
-                        color: white;
-                        background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
-                                    stop:0 #4CAF50, stop:1 #45a049);
-                    }
-                    QPushButton:hover {
-                        background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
-                                    stop:0 #45a049, stop:1 #3d8b40);
-                    }
-                    QPushButton:pressed {
-                        background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
-                                    stop:0 #3d8b40, stop:1 #2e7d32);
-                    }
-                """)
-
-                msg_box.exec_()
-
-            except Exception as e:
-                QMessageBox.critical(dialog, "❌ 错误", f"清空失败: {e}")
-
-    # 连接信号
     btn_search.clicked.connect(do_search)
     btn_download.clicked.connect(download_selected)
     btn_view_files.clicked.connect(view_downloaded_files)
     btn_clear_cache.clicked.connect(clear_cache)
-
-    # 回车搜索
     search_box.returnPressed.connect(do_search)
 
-    # 显示对话框
-    dialog.exec_()
+    dialog.exec()

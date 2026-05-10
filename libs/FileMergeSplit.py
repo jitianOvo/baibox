@@ -1,13 +1,13 @@
-from PyQt5.QtWidgets import (
+from PySide6.QtWidgets import (
     QDialog, QLabel, QLineEdit, QPushButton,
     QFileDialog, QVBoxLayout, QHBoxLayout, QGroupBox
 )
-from PyQt5.QtCore import Qt
+from PySide6.QtCore import Qt
 import core_lib
-from PyQt5.QtWidgets import QMessageBox
+from PySide6.QtWidgets import QMessageBox
 import os
 import sys
-from PyQt5.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication
 
 # ========= 路径安全检测函数 ==========
 
@@ -178,7 +178,7 @@ class FileMergeSplitDialog(QDialog):
 
 def Open_FileMergeSplit(parent=None):
     dialog = FileMergeSplitDialog(parent=parent)
-    dialog.exec_()
+    dialog.exec()
 
 
 if __name__ == "__main__":
@@ -186,4 +186,4 @@ if __name__ == "__main__":
     # app = QApplication(sys.argv)
     # dialog = FileMergeSplitDialog()
     # dialog.show()
-    # sys.exit(app.exec_())
+    # sys.exit(app.exec())

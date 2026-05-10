@@ -1,14 +1,13 @@
 import os
-import sys
 import json
 import platform
 import subprocess
 from pathlib import Path
-from PyQt5.QtWidgets import (
+from PySide6.QtWidgets import (
     QApplication, QDialog, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton,
     QTreeWidget, QTreeWidgetItem, QFileDialog, QMessageBox, QHeaderView, QMenu
 )
-from PyQt5.QtCore import Qt, QPoint
+from PySide6.QtCore import Qt, QPoint
 
 # --- 配置文件路径 ---
 USER_HOME = Path.home()
@@ -163,7 +162,7 @@ class FileSearcherDialog(QDialog):
             return
         menu = QMenu()
         open_folder_action = menu.addAction("打开所在文件夹")
-        action = menu.exec_(self.tree.mapToGlobal(pos))
+        action = menu.exec(self.tree.mapToGlobal(pos))
         if action == open_folder_action:
             file_path = item.text(0)
             folder_path = os.path.dirname(file_path)
@@ -190,7 +189,7 @@ def open_file_searcher(parent=None):
     parent: 可选的父窗口
     """
     dlg = FileSearcherDialog(parent)
-    dlg.exec_()  # 模态对话框，不可点击父窗口
+    dlg.exec()  # 模态对话框，不可点击父窗口
 
 
 if __name__ == "__main__":
@@ -198,4 +197,4 @@ if __name__ == "__main__":
     # app = QApplication(sys.argv)
     # dlg = FileSearcherDialog()
     # dlg.show()
-    # sys.exit(app.exec_())
+    # sys.exit(app.exec())

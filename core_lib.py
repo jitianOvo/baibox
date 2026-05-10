@@ -4,7 +4,7 @@ import sys
 import math
 
 def ctypes_appid(IDname='®JT.jitian.v2.0'):
-    """为tk、pyqt5提供任务栏图标正常显示"""
+    """为tk、PySide6提供任务栏图标正常显示"""
     ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(IDname)
 
 def get_path(relative_path):

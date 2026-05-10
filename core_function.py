@@ -1,4 +1,3 @@
-# ==== 标准库 ====
 import ctypes
 import os
 import shutil
@@ -6,13 +5,9 @@ import subprocess
 import sys
 import winreg
 from tkinter import messagebox
-# ==== 第三方库 ====
-from PyQt5.QtWidgets import (
-    QMessageBox
-)
+from PySide6.QtWidgets import (QMessageBox)
 
 from core_lib import get_path
-
 
 def windows_key(self):
     # 激活正版
@@ -160,11 +155,6 @@ def six_class_hide_cancel(self):
             print(f"恢复 {subkey} 失败：{e}")
     QMessageBox.information(None, "提示", "取消隐藏成功！")
 
-##########################################
-
-
-
-
 def explorer_clean(self,namespace_subkey: str = r"Software\Microsoft\Windows\CurrentVersion\Explorer\MyComputer\NameSpace") -> int:
     """
     删除 HKCU\\...\\MyComputer\\NameSpace 下形如 {GUID} 的子键。
@@ -232,46 +222,35 @@ def oneplus_unblock_BL(self):
 def win11_settings(self):
     subprocess.Popen(get_path('tools/bin/Windows11轻松设置/Windows11轻松设置.exe'), shell=True)
 
-
 def driver360(self):
     subprocess.Popen(get_path('tools/bin/360驱动大师纯净版-2.0.0.1970-绿色单文件.exe'), shell=True)
-
 
 def driverGenius(self):
     subprocess.Popen(get_path('tools/bin/驱动精灵标准版-9.70.0.104-纯净版绿色单文件.exe'), shell=True)
 
-
 def Everything64(self):
     subprocess.Popen(get_path('tools/bin/Everything64.exe'), shell=True)
-
 
 def Geek(self):
     subprocess.Popen(get_path('tools/bin/Geek.exe'), shell=True)
 
-
 def DiskCheck(self):
     subprocess.Popen(get_path('tools/bin/磁盘空间分析器.exe'), shell=True)
-
 
 def Wiztree(self):
     ctypes.windll.shell32.ShellExecuteW(None, "runas", get_path('tools/bin/Wiztree_4_28/WizTree.exe'), "", None, 1)
 
-
 def getico(self):
     subprocess.Popen(get_path('tools/bin/图标提取转换器(Quick Any2Ico)3.5.0.0汉化版.exe'), shell=True)
-
 
 def python3_13_4(self):
     subprocess.Popen(get_path('tools/bin/python-3.13.4-amd64.exe'), shell=True)
 
-
 def EFNdelete(self):
     subprocess.Popen(get_path('tools/bin/EmptyFolderNuker.chs空文件删除.exe'), shell=True)
 
-
 def SteamSetup(self):
     subprocess.Popen(get_path('tools/bin/SteamSetup.exe'), shell=True)
-
 
 click_times = 0
 
@@ -300,7 +279,6 @@ def del_cache(self):
             messagebox.showinfo('你会放弃的', f'很难想象你是个人类+{click_times - 36}')
         elif click_times == 51:
             messagebox.showinfo('我认输', '你无敌了孩子 投了投了,下一把,别折磨我了求你了')
-
 
 def Krokiet(self):
     subprocess.Popen(get_path('tools/bin/Krokiet10.0.exe'), shell=True)

@@ -1,8 +1,8 @@
 # ==== 标准库 ====
 import os,shutil,subprocess
 # ==== 第三方库 ====
-from PyQt5.QtCore import Qt, QThread, pyqtSignal
-from PyQt5.QtWidgets import (
+from PySide6.QtCore import Qt, QThread, Signal
+from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QLabel, QProgressBar,
 )
 
@@ -11,8 +11,8 @@ import lanzoui
 import core_lib
 ###################云安装↓#######################
 class DownloadThread(QThread):
-    progress = pyqtSignal(int)  # 百分比
-    finished = pyqtSignal()
+    progress = Signal(int)  # 百分比
+    finished = Signal()
 
     def __init__(self, name, exe_name, urls):
         super().__init__()
@@ -121,7 +121,7 @@ def install_package(parent, name, exe_name, urls):
 
     # 弹出安装进度窗口
     dialog = InstallDialog(name, exe_name, urls, parent=parent)
-    dialog.exec_()
+    dialog.exec()
 
 def jdk11(self):
     install_package(
@@ -172,6 +172,7 @@ def Radminlan(self):
         "Radminlan",
         "Radmin_LAN.exe",
         ['https://jitianna.lanzoul.com/iTgUC35dcvte'])
+
 def Pycharm(self):
     install_package(
         self,

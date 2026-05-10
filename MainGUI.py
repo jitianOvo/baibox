@@ -1,22 +1,51 @@
 import sys,ctypes,lanzoui
 from core_lib import *
-from PyQt5 import QtCore, QtWidgets
-from PyQt5.QtCore import (Qt,QSize,QPoint,QEvent,QTimer,QThread,pyqtSignal,QRegularExpression,)
-from PyQt5.QtGui import (QFont,QFontDatabase,QPixmap,QIcon,QColor,QTextCursor,QMouseEvent,QSyntaxHighlighter,QTextCharFormat,)
-from PyQt5.QtWidgets import (QApplication,QWidget,QDialog,QFrame,QLabel,QPushButton,QLineEdit,QTextEdit,QListWidget,
-QListWidgetItem,QFileDialog,QMessageBox,QVBoxLayout,QHBoxLayout,QProgressBar,QScrollArea,QStackedWidget,)
+from PySide6 import QtCore, QtWidgets
+from PySide6.QtCore import (Qt,QSize,QPoint,QEvent,QTimer,QThread,Signal,QRegularExpression,)
+from PySide6.QtGui import (QFont,QFontDatabase,QPixmap,QIcon,QColor,QTextCursor,QMouseEvent,QSyntaxHighlighter,QTextCharFormat,)
+from PySide6.QtWidgets import (QApplication,QWidget,QDialog,QFrame,QLabel,QPushButton,QLineEdit,QTextEdit,QListWidget,
+QListWidgetItem,QFileDialog,QMessageBox,QVBoxLayout,QHBoxLayout,QProgressBar,QScrollArea,QStackedWidget,QSizePolicy,)
 
-VERSION = "v2.1"
+VERSION = "v2.2"
 
 def VERSION_CODE():
     version = int(float(VERSION.split('v')[1]) * 100)
     return version
 
+def build_ui_font(point_size=10, weight=QFont.Normal):
+    font = QFont("Microsoft YaHei UI", point_size, weight)
+
+    style_hint_enum = getattr(QFont, "StyleHint", None)
+    if style_hint_enum is not None and hasattr(style_hint_enum, "System"):
+        font.setStyleHint(style_hint_enum.System)
+
+    style_strategy_enum = getattr(QFont, "StyleStrategy", None)
+    if style_strategy_enum is not None and hasattr(style_strategy_enum, "PreferAntialias"):
+        style_strategy = style_strategy_enum.PreferAntialias
+        for name in ("PreferOutline", "PreferQuality"):
+            if hasattr(style_strategy_enum, name):
+                style_strategy |= getattr(style_strategy_enum, name)
+        font.setStyleStrategy(style_strategy)
+
+    hinting_enum = getattr(QFont, "HintingPreference", None)
+    if hinting_enum is not None and hasattr(hinting_enum, "PreferVerticalHinting"):
+        font.setHintingPreference(hinting_enum.PreferVerticalHinting)
+
+    return font
+
+class NoHorizontalScrollArea(QScrollArea):
+    """锁定横向滚动，防止触摸板横向手势把页面带偏。"""
+    def wheelEvent(self, event):
+        super().wheelEvent(event)
+        hbar = self.horizontalScrollBar()
+        if hbar.value() != 0:
+            hbar.setValue(0)
+
 class MainWindow(QWidget):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("超级白工具箱")
-        self.resize(100, 460)
+        self.resize(150, 500)
         self.setWindowIcon(QIcon(get_path('assets/logos/iconic.ico')))
         self.setWindowFlags(Qt.FramelessWindowHint)
         self.setStyleSheet("background-color: white;")
@@ -38,7 +67,7 @@ class MainWindow(QWidget):
         self.console_window = QWidget()
         self.console_window.setWindowTitle(f"【控制台】超级白工具箱 {VERSION} - ©2025–2026")
         self.console_window.setWindowFlags(Qt.Tool | Qt.WindowCloseButtonHint)
-        self.console_window.resize(800, 500)
+        self.console_window.resize(850, 600)
 
         # 主布局
         main_layout = QVBoxLayout(self.console_window)
@@ -254,7 +283,7 @@ class MainWindow(QWidget):
 
         # 主标题
         title_label = QLabel("JITIAN")
-        title_label.setFont(QFont("黑体", 15, QFont.Bold))
+        title_label.setFont(build_ui_font(15, QFont.Bold))
         title_label.setStyleSheet("color: #8e98ac;")
         top_layout.addWidget(title_label)
 
@@ -270,7 +299,7 @@ class MainWindow(QWidget):
             version_label.setContentsMargins(0, 7, 0, 0)  #版本号字体上下参数调第二个 上边距增加 5 像素，让文字稍微往下一点
 
         else:
-            version_label.setFont(QFont("黑体", 15))
+            version_label.setFont(build_ui_font(15))
 
         version_label.setStyleSheet("color: #8e98ac;")  # 与主标题颜色一致
         top_layout.addWidget(version_label)
@@ -298,7 +327,7 @@ class MainWindow(QWidget):
 
         # ==== 中间标题 ====
         title = QLabel("超级白工具箱")
-        title.setFont(QFont("微软雅黑", 17, QFont.Bold))
+        title.setFont(build_ui_font(17, QFont.Bold))
         title.setAlignment(Qt.AlignCenter)
         title.setStyleSheet("color: #222; padding: 8px; border-bottom: 1px solid #CCC;")  # 尺寸
         main_layout.addWidget(title)
@@ -307,6 +336,7 @@ class MainWindow(QWidget):
         content = QWidget()
         content_layout = QHBoxLayout(content)
         content_layout.setContentsMargins(0, 0, 0, 0)  # 消除布局的外边距 中下方整个背景
+        content_layout.setSpacing(2)
 
         # 左侧分类区
         self.category_list = QListWidget()
@@ -415,6 +445,7 @@ class MainWindow(QWidget):
             ("清理本软件缓存", "#FF00FF", get_path("assets/logos/boss2.png"), self.del_cache),
             ("分券工具", "#FF00FF", get_path("assets/logos/boss3.png"), self.Open_FileMergeSplit),
             ('指定文件夹搜索文本',"#FF00FF", get_path("assets/logos/love1.png"), self.open_file_searcher),
+            ("Hash+MD5重复清理", "#FF00FF", get_path("assets/logos/delete.png"), self.open_hash_md5_tool),
             ("李跳跳", "#FF00FF", get_path("assets/logos/Leetiaotiao.png"), self.Leetiaotiao),
             ("李跳跳发送配置", "#FF00FF", get_path("assets/logos/Leetiaotiao.png"), self.send_litiaotiao),
         ]))
@@ -430,6 +461,7 @@ class MainWindow(QWidget):
         content_layout.addWidget(self.category_list)
         content_layout.addWidget(self.stacked_widget)
         main_layout.addWidget(content)
+        QTimer.singleShot(0, self._reset_current_page_scroll)
 
     def build_tool_page(self, title, tool_list):
         """
@@ -441,12 +473,17 @@ class MainWindow(QWidget):
         main_layout.setContentsMargins(0, 0, 0, 0)
 
         # 创建滚动区域
-        scroll = QScrollArea()
+        scroll = NoHorizontalScrollArea()
         scroll.setWidgetResizable(True)
+        scroll.setAlignment(Qt.AlignTop | Qt.AlignLeft)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)  # 禁用水平滚动条
         # 这里加滚动条策略
         scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        hbar = scroll.horizontalScrollBar()
+        hbar.setEnabled(False)
+        hbar.rangeChanged.connect(lambda _min, _max, bar=hbar: bar.setValue(0))
+        hbar.valueChanged.connect(lambda value, bar=hbar: bar.setValue(0) if value != 0 else None)
 
         # 如果想限制宽度防止布局撑开
         scroll.setFixedWidth(250)  # 根据你的左侧菜单实际宽度调整
@@ -476,15 +513,18 @@ class MainWindow(QWidget):
 
         # 创建内容容器
         content = QWidget()
+        content.setLayoutDirection(Qt.LeftToRight)
         layout = QVBoxLayout(content)
-        layout.setContentsMargins(20, 20, 20, 20)
+        layout.setContentsMargins(8, 14, 12, 14)
         layout.setSpacing(12)
+        layout.setAlignment(Qt.AlignTop | Qt.AlignLeft)
 
         for text, color, icon_path, callback in tool_list:
             btn = QPushButton(text)
             btn.setIcon(QIcon(icon_path))
             btn.setIconSize(QSize(35, 35))
             btn.setCursor(Qt.PointingHandCursor)
+            btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
             btn.setStyleSheet(f"""
                 QPushButton {{
                     background-color: #F0F0F0;
@@ -511,24 +551,38 @@ class MainWindow(QWidget):
 
     def switch_page(self, index):
         self.stacked_widget.setCurrentIndex(index)
+        QTimer.singleShot(0, self._reset_current_page_scroll)
+
+    def _reset_current_page_scroll(self):
+        current_page = self.stacked_widget.currentWidget()
+        if not current_page:
+            return
+        scroll = current_page.findChild(QScrollArea)
+        if not scroll:
+            return
+        scroll.verticalScrollBar().setValue(0)
+        scroll.horizontalScrollBar().setValue(0)
 
     def mousePressEvent(self, event: QMouseEvent):
         # 只有当窗口不是最小化状态时才允许拖动
-        if not self.is_minimized and event.button() == Qt.LeftButton and event.pos().y() < 40:
-            self.old_pos = event.globalPos()
+        cursor_pos = event.position().toPoint()
+        if not self.is_minimized and event.button() == Qt.LeftButton and cursor_pos.y() < 40:
+            self.old_pos = event.globalPosition().toPoint()
             event.accept()
 
     def mouseMoveEvent(self, event: QMouseEvent):
         # 只有当窗口不是最小化状态时才允许拖动
-        if not self.is_minimized and event.buttons() == Qt.LeftButton and event.pos().y() < 40:
-            delta = QPoint(event.globalPos() - self.old_pos)
+        cursor_pos = event.position().toPoint()
+        if not self.is_minimized and event.buttons() == Qt.LeftButton and cursor_pos.y() < 40:
+            global_pos = event.globalPosition().toPoint()
+            delta = global_pos - self.old_pos
             self.move(self.x() + delta.x(), self.y() + delta.y())
-            self.old_pos = event.globalPos()
+            self.old_pos = global_pos
             event.accept()
 
     def changeEvent(self, event):
         # 处理窗口状态变化事件
-        if event.type() == QEvent.WindowStateChange:
+        if event.type() == QEvent.Type.WindowStateChange:
             self.is_minimized = self.isMinimized()
         super().changeEvent(event)
 
@@ -541,6 +595,7 @@ import libs.FileMergeSplit as fms
 import libs.DeepSearch as ds
 import libs.SoftWareStore as store
 import libs.Cloud_Installation_Service as cloud
+import libs.HashMD5Tool as hashmd5
 import core_function as core
 # ================== 统一绑定表 ==================
 
@@ -603,6 +658,9 @@ BINDINGS = {
     ds: [
         'open_file_searcher',
     ],
+    hashmd5: [
+        'open_hash_md5_tool',
+    ],
     store: [
         'SoftWareStore',
     ],
@@ -637,16 +695,12 @@ if __name__ == '__main__':
     # 云控
     lanzoui.total_control()
 
-    # —— ① Qt 层：高 DPI + 高质量缩放 ——
-    QtWidgets.QApplication.setAttribute(QtCore.Qt.AA_EnableHighDpiScaling)
-    QtWidgets.QApplication.setAttribute(QtCore.Qt.AA_UseHighDpiPixmaps)
-    QtWidgets.QApplication.setAttribute(QtCore.Qt.AA_DisableWindowContextHelpButton)
-    # # —— ② Windows 层：高 DPI 感知（只能一次）——
-    ctypes.windll.shcore.SetProcessDpiAwareness(2)  # ← 改：1 → 2，只留这一处
+    # Qt 6 on Windows is DPI-aware by default; keep the native PMv2 behavior.
     ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(
         f'®JT.jitian.{VERSION}'
     )
     app = QtWidgets.QApplication(sys.argv)
+    app.setFont(build_ui_font())
     window = MainWindow()
     window.show()
     sys.exit(app.exec())

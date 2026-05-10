@@ -1,6 +1,6 @@
 from tkinter import messagebox
 import re,sys,subprocess,os,requests,importlib,execjs
-
+from assets.aira2c.aria2c_api import aria2_download
 
 def get_direct_link(url):
     # 第0层 获取arg3
@@ -99,17 +99,20 @@ def download_file(url, save_path, auto_title=True):
 
     title = re.findall('<title>(.*?) - 蓝奏云</title>', response2.text)[0]
     url_link = get_direct_link(url=url)
+    # print('url_link:', url_link)
     if auto_title:
         # 确保目录存在
         os.makedirs(save_path, exist_ok=True)
         save_path = os.path.join(save_path, title)
     try:
-        with requests.get(url_link, stream=True) as r:
-            r.raise_for_status()
-            with open(save_path, 'wb') as f:
-                for chunk in r.iter_content(chunk_size=8192):
-                    if chunk:
-                        f.write(chunk)
+        # 直接使用 requests 下载可能会被服务器限制，改用 aria2c 多线程下载
+        # with requests.get(url_link, stream=True) as r:
+        #     r.raise_for_status()
+        #     with open(save_path, 'wb') as f:
+        #         for chunk in r.iter_content(chunk_size=8192):
+        #             if chunk:
+        #                 f.write(chunk)
+        aria2_download(url_link, threads=16, path=os.path.dirname(save_path))
         return True
     except Exception as e:
         print(f"下载失败: {e}")
