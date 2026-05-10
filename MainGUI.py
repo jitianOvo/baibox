@@ -65,7 +65,7 @@ class MainWindow(QWidget):
     def init_console(self):
         """初始化扁平控制台窗口"""
         self.console_window = QWidget()
-        self.console_window.setWindowTitle(f"【控制台】超级白工具箱 {VERSION} - ©2025–2026")
+        self.console_window.setWindowTitle(f"【控制台】超级白工具箱 {VERSION} - ©2026–2027")
         self.console_window.setWindowFlags(Qt.Tool | Qt.WindowCloseButtonHint)
         self.console_window.resize(850, 600)
 
@@ -400,7 +400,7 @@ class MainWindow(QWidget):
         ]))
 
         self.stacked_widget.addWidget(self.build_tool_page("电脑脚本", [
-            ("FUCK-强卸腾讯ACE", "#DE3163", get_path("assets/logos/fuck_ace.png"), self.fuckAce),
+            ("腾讯ACE一键根除", "#DE3163", get_path("assets/logos/Uninstall_ACE.png"), self.Uninstall_ACE),
             ("激活WIN10/WIN11正版", "#DE3163", get_path("assets/logos/win11.png"), self.windows_key),
             ("F1禁止跳Edge浏览器", "#DE3163", get_path("assets/logos/edge_fk.png"), self.prevent_F1),
             ("还原win10右键菜单", "#DE3163", get_path("assets/logos/win10_black.png"), self.win10_menu),
@@ -444,10 +444,9 @@ class MainWindow(QWidget):
             ("软件中心", "#FF00FF", get_path("assets/logos/boss.png"), self.SoftWareStore),
             ("清理本软件缓存", "#FF00FF", get_path("assets/logos/boss2.png"), self.del_cache),
             ("分券工具", "#FF00FF", get_path("assets/logos/boss3.png"), self.Open_FileMergeSplit),
-            ('指定文件夹搜索文本',"#FF00FF", get_path("assets/logos/love1.png"), self.open_file_searcher),
-            ("Hash+MD5重复清理", "#FF00FF", get_path("assets/logos/delete.png"), self.open_hash_md5_tool),
-            ("李跳跳", "#FF00FF", get_path("assets/logos/Leetiaotiao.png"), self.Leetiaotiao),
-            ("李跳跳发送配置", "#FF00FF", get_path("assets/logos/Leetiaotiao.png"), self.send_litiaotiao),
+            ('指定文件夹搜索文本',"#FF00FF", get_path("assets/logos/search.png"), self.open_file_searcher),
+            ("Hash+MD5重复清理", "#FF00FF", get_path("assets/logos/garbage_truck_recycling.png"), self.open_hash_md5_tool),
+            ("安装李跳跳并发送配置文件", "#FF00FF", get_path("assets/logos/Leetiaotiao.png"), self.Leetiaotiao),
         ]))
 
         self.stacked_widget.addWidget(self.build_tool_page("图片", [
@@ -455,7 +454,6 @@ class MainWindow(QWidget):
             (" 台式显卡天梯图", "#8d39e8", get_path("assets/logos/gpu.png"), self.show_GPU),
             (" 笔记本CPU天梯图", "#8d39e8", get_path("assets/logos/cpu_m.png"), self.show_CPUm),
             (" 笔记本显卡天梯图", "#8d39e8", get_path("assets/logos/gpu_m.png"), self.show_GPUm),
-
         ]))
 
         content_layout.addWidget(self.category_list)
@@ -626,7 +624,7 @@ BINDINGS = {
         'HiBitUninstaller',
         'OfficeTool',
         'RAMMap',
-        'fuckAce'
+        'Uninstall_ACE'
     ],
     android:[
         'open_scrcpy',
@@ -643,8 +641,7 @@ BINDINGS = {
         'install_environment_apks',
         'adb_reboot',
         'on_choose_devices_clicked',
-        'Leetiaotiao',
-        'send_litiaotiao',
+        'Leetiaotiao'
     ],
     show_img: [
         'show_CPU',

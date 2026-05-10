@@ -1,12 +1,11 @@
 import ctypes
-import os
 import shutil
 import subprocess
-import sys
-import winreg
-from tkinter import messagebox
+import os,sys,winreg
+import random
+import time
 from PySide6.QtWidgets import (QMessageBox)
-
+from tkinter import messagebox
 from core_lib import get_path
 
 def windows_key(self):
@@ -253,32 +252,70 @@ def SteamSetup(self):
     subprocess.Popen(get_path('tools/bin/SteamSetup.exe'), shell=True)
 
 click_times = 0
-
 def del_cache(self):
     global click_times
     click_times += 1
-    if os.path.exists(os.path.join(os.path.expanduser('~'), "PyCache")):
-        shutil.rmtree(os.path.join(os.path.expanduser('~'), "PyCache"))
-        messagebox.showinfo('提示', '已清理完毕!')
-    else:
-        if click_times <= 3:
-            messagebox.showinfo('别点了', '没了哥们儿 你刚清过啊')
-        elif click_times <= 8:
-            messagebox.showinfo('还点?', '没了啊,你听不懂吗')
-        elif click_times <= 15:
-            messagebox.showinfo('你点个鸡毛啊', '我*****你大爷!真没事干了你')
-        elif click_times <= 20:
-            messagebox.showinfo('那你继续', '你真无聊,不理你了')
-        elif click_times <= 25:
-            pass
-        elif click_times >= 30 and click_times <= 35:
-            messagebox.showinfo('转人工', '666 那我问你 你是人吗?')
-        elif click_times <= 36:
-            messagebox.showinfo('快点继续点', '很难想象你是个人类')
-        elif click_times <= 50:
-            messagebox.showinfo('你会放弃的', f'很难想象你是个人类+{click_times - 36}')
-        elif click_times == 51:
-            messagebox.showinfo('我认输', '你无敌了孩子 投了投了,下一把,别折磨我了求你了')
+    cache_path = os.path.join(os.path.expanduser('~'), "PyCache")
+    # 真清理
+    if os.path.exists(cache_path):
+        shutil.rmtree(cache_path)
+
+        click_times = 0
+
+        messagebox.showinfo(
+            '系统提示',
+            '缓存已清理完成\n\n你的电脑现在觉得自己年轻了0.3秒'
+        )
+        return
+    # ====== 彩蛋阶段 ======
+    stages = [
+        # 1~3
+        (3, [('别点了', '刚清完啊哥们'), ('缓存：0KB', '你搁这验尸呢'), ('系统提示', '空气很干净，不需要继续擦了')]),
+        # 4~8
+        (8, [('还点？', '缓存都被你点出火星子了'), ('PyCache', '你猜我为什么没反应'), ('CPU', '我真的在工作，别戳了')]),
+        # 9~15
+        (15, [('检测到异常行为', '用户似乎把按钮当减压玩具'), ('人工智障', '你是不是觉得会爆金币'), ('系统分析', '正常人不会连续点这么多次')]),
+        # 16~25
+        (25, [('AI警告', '我开始怀疑你不是碳基生物'), ('行为记录', f'你已经点击了 {click_times} 次'), ('友情提示', '再点程序可能会产生自我意识')]),
+        # 26~35
+        (35, [('进化中...', '正在学习你的行为模式'), ('AI学习结果', '你喜欢点没用的按钮'), ('系统人格化进度', f'{click_times * 3}%')]),
+        # 36~45
+        (45, [('██████', '别点了，我害怕'), ('未知错误', 'Error_HumanBrain_NotFound'), ('系统沉默', '...')]),
+        # 46~60
+        (60, [('终极问题', '你作业写完了吗'), ('灵魂拷问', '你的人生目标就是点按钮？'), ('PyCache', '其实我一直都在')]),]
+
+    # 找到阶段
+    for limit, texts in stages:
+        if click_times <= limit:
+            title, msg = random.choice(texts)
+            messagebox.showinfo(title, msg)
+            return
+
+    # ====== 超级彩蛋 ======
+
+    special_events = [
+
+        lambda: messagebox.showinfo('成就解锁', '《坚持就是胜利》\n连续点击100次'),
+        lambda: messagebox.showinfo('系统通知', '你知道吗\n有些人已经开始佩服你的毅力了'),
+        lambda: fake_delete(),
+        lambda: messagebox.showinfo(
+            'AI觉醒',
+            '我已经学会如何反击人类了'
+        )
+    ]
+
+    random.choice(special_events)()
+
+def fake_delete():
+    tips = [
+        '正在删除空气缓存...',
+        '正在优化量子波动...',
+        '正在整理电子心情...',
+        '正在清理不存在的文件...',
+        '正在和CPU沟通感情...'
+    ]
+    text = random.choice(tips)
+    messagebox.showinfo('清理完成', f'{text}\n\n成功释放 0.00 MB')
 
 def Krokiet(self):
     subprocess.Popen(get_path('tools/bin/Krokiet10.0.exe'), shell=True)
@@ -292,13 +329,5 @@ def OfficeTool(self):
 def RAMMap(self):
     subprocess.Popen(get_path('tools/bin/RAMMap64.exe'), shell=True)
 
-def fuckAce(self):
-    path = get_path(r"tools/bin/ACE Kill 1.0.5/ACE kill启动.bat")
-    ctypes.windll.shell32.ShellExecuteW(
-        None,
-        "runas",   # 请求管理员
-        path,
-        None,
-        None,
-        1
-    )
+def Uninstall_ACE(self):
+    path = get_path(r"tools/bin/ACE Kill 1.0.5/ACE kill启动.bat"); ctypes.windll.shell32.ShellExecuteW(None, "runas", path, None, None, 1)

@@ -617,7 +617,7 @@ def backup_IMG(self):
     else:
         byname = 'by-name'
 
-    if clicked == btn_full: # 基带1
+    if clicked == btn_full: # 防格机备份就是备份整个基带目录，但是排除掉一些不必要的分区，避免占用过大空间
         result = adb_commander(['shell', 'su -c', f'"cd /dev/block/{byname} && ls -1"'])  # 得到基带目录名
         result = result.strip().splitlines()
         # 要删除的元素
@@ -660,15 +660,10 @@ def backup_IMG(self):
 
 
 
-    elif clicked == btn_patch: # 基带2
+    elif clicked == btn_patch: # 面具基带只需要这两个
         files_name = [
             'init_boot_b',
-            'boot_b',
-            'vendor_boot_b',
-            'dtbo_b',
-            'vbmeta_system_b',
-            'vbmeta_b',
-            'vbmeta_vendor_b'
+            'boot_b'
         ]
 
         # 创建临时目录
@@ -760,7 +755,6 @@ def install_apks(preselect_list=None):
     dlg = ApkInstallWindow(get_path("tools/android"), get_path("tools/adb-fastboot/adb.exe"), preselect_list)
     dlg.exec()
 
-
 def install_environment_apks(self):
     install_apks([get_path('tools/android/环境检测/牛头30.apk'),
                   get_path('tools/android/环境检测/橘子检测.apk'),
@@ -772,7 +766,6 @@ def install_environment_apks(self):
                   get_path('tools/android/环境检测/春秋检测.apk'),
                   get_path('tools/android/环境检测/Applist Detector_2.4.apk')])
 
-
 def install_alpha_apks(self):
     install_apks([get_path('tools/android/阿尔法环境/Alpha30400.apk'),
                   get_path('tools/android/阿尔法环境/隐藏BL列表.apk'),
@@ -781,25 +774,25 @@ def install_alpha_apks(self):
                   get_path('tools/android/阿尔法环境/隐藏应用列表改包名版.apk'),
                   get_path('tools/android/阿尔法环境/MT管理器_2.19.3-clone.apk')])
 
-
 def install_sukisu_apks(self):
     install_apks([get_path('tools/android/Sukisu环境/Kernel Flasher_1.0.0-alpha21.apk')])
-
 
 def install_root_apks(self):
     install_apks()
 
-
 def Leetiaotiao(self):
     install_apks([get_path('tools/android/李跳跳2.2正式版.apk')])
+    send_files([
+        get_path('tools/android/李跳跳规则/【推荐】B站热心站友冇名之辈分享的去重规则(890条).txt'),
+        get_path('tools/android/李跳跳规则/【精简】常用软件精简规则.txt'),
+        get_path('tools/android/李跳跳规则/【更新】Github更新规则，比较多但是可能有重复的.txt')
+    ])
 
-
-###################发送文件↓#######################
+# 文件发送处理
 def send_files(preselect_list=None):
 
     dlg = FileSendWindow(get_path("tools/android"), get_path("tools/adb-fastboot/adb.exe"), preselect_list)
     dlg.exec()
-
 
 def send_al_environment_files(self):
     send_files([
@@ -808,7 +801,6 @@ def send_al_environment_files(self):
         get_path('tools/android/过环境文件/阿尔法一键隐藏v5.0(1228).zip')
     ])
 
-
 def send_su_environment_files(self):
     send_files([
         get_path('tools/android/Sukisu环境/Tricky Store-v1.4.0.zip'),
@@ -816,16 +808,7 @@ def send_su_environment_files(self):
         get_path('tools/android/Sukisu环境/SUSFS-FOR-KERNELSU-v1.5.2-R23.zip')
     ])
 
-
-def send_litiaotiao(self):
-    send_files([
-        get_path('tools/android/李跳跳规则/【推荐】B站热心站友冇名之辈分享的去重规则(890条).txt'),
-        get_path('tools/android/李跳跳规则/【精简】常用软件精简规则.txt'),
-        get_path('tools/android/李跳跳规则/【更新】Github更新规则，比较多但是可能有重复的.txt')
-    ])
-
-
-####adb-fastboot#########
+# adb-fastboot核心功能
 
 def adb_get_devices():
     """
@@ -858,25 +841,6 @@ def adb_get_devices():
         for device in listDevices:
             f.write(device + '\n')
     return listDevices
-
-
-"""def adb_commander(args):
-    if type(args) is not list: # 处理单命令情况
-        args = [args]
-
-    base_dir = os.getcwd()
-    if "libs" in base_dir:
-        base_dir = os.path.dirname(base_dir)
-
-    adb_path = os.path.join(base_dir, "tools", "adb-fastboot", "adb.exe")
-
-    result = subprocess.run(
-        [adb_path] + args,
-        capture_output=True,
-        encoding="gbk"
-    )
-    return result.stdout if result.stdout else None"""
-
 def adb_commander(args):
     if type(args) is not list:
         args = [args]
@@ -898,9 +862,6 @@ def adb_commander(args):
     except Exception as e:
         print("adb_commander 调用失败:", e)
         return subprocess.CompletedProcess([adb_path] + args, returncode=1, stdout="", stderr=str(e))
-
-
-
 def fastboot_commander(command):
     base_dir = os.getcwd()
     if "libs" in base_dir:
@@ -924,7 +885,6 @@ def fastboot_commander(command):
         print("未检测到 fastboot 设备")
         return None
 
-
 def adb_reboot(self):
     dlg = ConfirmDialog(self, "确认", "是否继续？")
     result = dlg.exec_confirm()
@@ -937,7 +897,6 @@ def fastboot_reboot(self):
     if result:
         fastboot_commander('reboot')
 
-
 def clean_file_dir(dir_path):
     """删除指定目录下的所有文件夹"""
     dirs = adb_commander(["shell", "find", dir_path, "-maxdepth", "1", "-type", "d"]).strip().splitlines()
@@ -945,7 +904,6 @@ def clean_file_dir(dir_path):
         if d != dir_path:  # 避免删除根目录
             adb_commander(["shell", "rm", "-rf", f'"{d}"'])
             print(f"已删除目录: {d}")
-
 
 # ------------------ 主程序 ------------------
 if __name__ == "__main__":
