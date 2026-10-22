@@ -19,6 +19,11 @@ venv/
 
 # Private settings, user records and local archives
 /.archive/
+/docs/notes/
+/docs/ARCHIVE-*.md
+/tests/
+/test/
+/Test/
 /data/local/
 /data/cache/
 /data/media_hub/
@@ -38,3 +43,6 @@ Desktop.ini
 # Local tool preferences (the programs themselves remain versioned)
 /tools/bin/Quick_Any2Ico.ini
 /tools/bin/Wiztree_4_28/WizTree3.ini
+
+# Removed unused package
+/tools/android/Root程序/Scene_8.1.2破解版.zip
