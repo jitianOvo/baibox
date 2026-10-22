@@ -31,7 +31,7 @@
 git clone https://github.com/jitianOvo/baibox.git
 cd baibox
 python -m venv .venv
-.\.venv\Scripts\python.exe -m pip install PySide6 requests PyExecJS -r libs/media_hub/requirements.txt
+.\.venv\Scripts\python.exe -m pip install PySide6 requests PyExecJS customtkinter -r libs/media_hub/requirements.txt
 .\.venv\Scripts\python.exe MainGUI.py
 ```
 
