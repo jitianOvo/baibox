@@ -1,14 +1,420 @@
 import os
+import re
+import shutil
 import subprocess
+import sys
 from core_lib import get_path
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QIcon, QFont
 from PySide6.QtWidgets import (
     QLabel, QMessageBox, QListWidget, QListWidgetItem, QDialog, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
-    QCheckBox, QPushButton, QScrollArea
+    QCheckBox, QPushButton, QScrollArea, QLineEdit, QFileDialog, QComboBox
 )
 from PySide6 import QtWidgets, QtGui, QtCore
-# 窗口类
+
+_RUNTIME_PATHS_CACHE = None
+_RUNTIME_ADBFASTBOOT_DIR = None
+_ADB_SERVER_WARMED = False
+
+
+def set_qt_application_attribute(attr_name):
+    """
+    Qt5 -> Qt6 兼容辅助：
+    若 QApplication 已创建，Qt6 下这些属性无法再安全设置，直接忽略即可。
+    """
+    app = QtWidgets.QApplication.instance()
+    enum_val = None
+    if hasattr(QtCore.Qt, "ApplicationAttribute"):
+        enum_val = getattr(QtCore.Qt.ApplicationAttribute, attr_name, None)
+    if enum_val is None:
+        enum_val = getattr(QtCore.Qt, attr_name, None)
+    if enum_val is None:
+        return False
+    if app is None:
+        QtWidgets.QApplication.setAttribute(enum_val)
+        return True
+    return False
+def _build_dialog_font(point_size=11, weight=QFont.Normal):
+    font = QFont("Microsoft YaHei UI", point_size, weight)
+    style_hint_enum = getattr(QFont, "StyleHint", None)
+    if style_hint_enum is not None and hasattr(style_hint_enum, "System"):
+        font.setStyleHint(style_hint_enum.System)
+
+    style_strategy_enum = getattr(QFont, "StyleStrategy", None)
+    if style_strategy_enum is not None and hasattr(style_strategy_enum, "PreferAntialias"):
+        style_strategy = style_strategy_enum.PreferAntialias
+        for name in ("PreferOutline", "PreferQuality"):
+            if hasattr(style_strategy_enum, name):
+                style_strategy |= getattr(style_strategy_enum, name)
+        if hasattr(style_strategy_enum, "ForceIntegerMetrics"):
+            style_strategy |= style_strategy_enum.ForceIntegerMetrics
+        font.setStyleStrategy(style_strategy)
+
+    hinting_enum = getattr(QFont, "HintingPreference", None)
+    if hinting_enum is not None:
+        if hasattr(hinting_enum, "PreferFullHinting"):
+            font.setHintingPreference(hinting_enum.PreferFullHinting)
+        elif hasattr(hinting_enum, "PreferVerticalHinting"):
+            font.setHintingPreference(hinting_enum.PreferVerticalHinting)
+    return font
+
+
+def _get_base_dir():
+    if getattr(sys, "frozen", False):
+        return os.path.dirname(os.path.abspath(sys.executable))
+    return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def _get_writable_base_dir():
+    if not getattr(sys, "frozen", False):
+        return _get_base_dir()
+    local_appdata = os.getenv("LOCALAPPDATA")
+    if local_appdata:
+        return os.path.join(local_appdata, "超级白工具箱")
+    return _get_base_dir()
+
+
+def _copy_file_if_needed(src_path, dst_path):
+    if not os.path.isfile(src_path):
+        return False
+
+    if os.path.isfile(dst_path):
+        src_stat = os.stat(src_path)
+        dst_stat = os.stat(dst_path)
+        if src_stat.st_size == dst_stat.st_size and int(src_stat.st_mtime) == int(dst_stat.st_mtime):
+            return False
+
+    os.makedirs(os.path.dirname(dst_path), exist_ok=True)
+    shutil.copy2(src_path, dst_path)
+    return True
+
+
+def _prepare_runtime_adbfastboot_dir():
+    global _RUNTIME_ADBFASTBOOT_DIR
+    if _RUNTIME_ADBFASTBOOT_DIR and os.path.isdir(_RUNTIME_ADBFASTBOOT_DIR):
+        return _RUNTIME_ADBFASTBOOT_DIR
+
+    if not getattr(sys, "frozen", False):
+        return None
+
+    src_dir = os.path.dirname(get_path("tools/adb-fastboot/adb.exe"))
+    if not os.path.isdir(src_dir):
+        return None
+
+    dst_dir = os.path.join(_get_writable_base_dir(), "runtime", "adb-fastboot")
+    os.makedirs(dst_dir, exist_ok=True)
+
+    for name in os.listdir(src_dir):
+        src = os.path.join(src_dir, name)
+        dst = os.path.join(dst_dir, name)
+        if os.path.isfile(src):
+            _copy_file_if_needed(src, dst)
+
+    _RUNTIME_ADBFASTBOOT_DIR = dst_dir
+    return dst_dir
+
+
+def _resolve_tool_path(relative_path, fallback_cmd):
+    normalized = relative_path.replace("\\", "/")
+    if normalized.startswith("tools/adb-fastboot/"):
+        runtime_dir = _prepare_runtime_adbfastboot_dir()
+        if runtime_dir:
+            runtime_tool = os.path.join(runtime_dir, os.path.basename(normalized))
+            if os.path.isfile(runtime_tool):
+                return runtime_tool
+
+    candidates = [
+        get_path(normalized),  # 开发态项目目录 / 打包态 _MEIPASS
+        os.path.join(_get_base_dir(), *normalized.split("/")),  # exe 同级目录兜底
+    ]
+    seen = set()
+    for candidate in candidates:
+        if not candidate:
+            continue
+        norm = os.path.normpath(candidate)
+        if norm in seen:
+            continue
+        seen.add(norm)
+        if os.path.isfile(norm):
+            return norm
+    return fallback_cmd  # 最后兜底系统 PATH（如已安装 adb/fastboot）
+
+
+def _get_runtime_paths():
+    global _RUNTIME_PATHS_CACHE
+    if _RUNTIME_PATHS_CACHE is not None:
+        return _RUNTIME_PATHS_CACHE
+
+    base_dir = _get_base_dir()
+    writable_base = _get_writable_base_dir()
+    data_dir = os.path.join(writable_base, "data")
+    cache_dir = os.path.join(data_dir, "cache")
+    _RUNTIME_PATHS_CACHE = {
+        "base_dir": base_dir,
+        "writable_base": writable_base,
+        "data_dir": data_dir,
+        "cache_dir": cache_dir,
+        "devices_path": os.path.join(cache_dir, "devices.txt"),
+        "my_devices_path": os.path.join(cache_dir, "my_devices.txt"),
+        "adb_path": _resolve_tool_path("tools/adb-fastboot/adb.exe", "adb"),
+        "fastboot_path": _resolve_tool_path("tools/adb-fastboot/fastboot.exe", "fastboot"),
+    }
+    return _RUNTIME_PATHS_CACHE
+def _read_selected_device():
+    paths = _get_runtime_paths()
+    device_file = paths["my_devices_path"]
+    if not os.path.exists(device_file):
+        return None
+    try:
+        with open(device_file, "r", encoding="utf-8") as f:
+            value = f.read().strip()
+            return value or None
+    except Exception:
+        return None
+def _write_selected_device(device_id):
+    paths = _get_runtime_paths()
+    os.makedirs(paths["cache_dir"], exist_ok=True)
+    with open(paths["my_devices_path"], "w", encoding="utf-8") as f:
+        f.write(device_id.strip())
+def _pick_device_dialog(parent, devices):
+    dialog = QDialog(parent)
+    dialog.setWindowTitle("选择设备")
+    dialog.setMinimumSize(360, 280)
+    if parent and not parent.windowIcon().isNull():
+        dialog.setWindowIcon(parent.windowIcon())
+
+    layout = QVBoxLayout(dialog)
+    layout.setContentsMargins(18, 18, 18, 18)
+    layout.setSpacing(10)
+
+    title = QLabel("请选择要使用的设备")
+    title.setAlignment(Qt.AlignCenter)
+    title.setStyleSheet("font-size: 15px; font-weight: bold;")
+    layout.addWidget(title)
+
+    selected = {"value": None}
+
+    for dev in devices:
+        btn = QPushButton(dev)
+        btn.setCursor(Qt.PointingHandCursor)
+        btn.setStyleSheet(
+            """
+            QPushButton {
+                padding: 9px 10px;
+                border-radius: 6px;
+                background: #F4F4F4;
+                border: 1px solid #CCCCCC;
+                text-align: center;
+            }
+            QPushButton:hover {
+                background: #E7F0FF;
+            }
+            """
+        )
+        btn.clicked.connect(lambda _, d=dev: (selected.update({"value": d}), dialog.accept()))
+        layout.addWidget(btn)
+
+    cancel = QPushButton("取消")
+    cancel.clicked.connect(dialog.reject)
+    layout.addWidget(cancel)
+
+    if dialog.exec() == QDialog.Accepted:
+        return selected["value"]
+    return None
+
+
+def _tool_exists(tool_path):
+    return tool_path and (
+        os.path.isfile(tool_path) or os.path.basename(tool_path).lower() in ("adb", "adb.exe", "fastboot", "fastboot.exe")
+    )
+
+
+def _show_missing_tool_message(parent, tool_name, configured_path):
+    hint = configured_path or "（空）"
+    ConfirmDialog(
+        parent,
+        "错误提示",
+        f"未找到 {tool_name} 可执行文件。\n当前路径：{hint}\n请检查打包是否包含 tools/adb-fastboot 目录。",
+    ).exec_confirm()
+
+
+def _warmup_adb_server():
+    global _ADB_SERVER_WARMED
+    if _ADB_SERVER_WARMED:
+        return
+
+    paths = _get_runtime_paths()
+    adb_path = paths["adb_path"]
+    if not _tool_exists(adb_path):
+        return
+
+    try:
+        subprocess.run(
+            [adb_path, "start-server"],
+            shell=False,
+            timeout=4,
+            capture_output=True,
+            encoding="utf-8",
+            errors="ignore",
+        )
+    except Exception:
+        return
+
+    _ADB_SERVER_WARMED = True
+def _ensure_adb_target(parent=None, action_name="该功能"):
+    devices = adb_get_devices(parent)
+    if not devices:
+        if parent:
+            ConfirmDialog(parent, "错误提示", f"未检测到 ADB 设备，无法执行：{action_name}").exec_confirm()
+        return None
+
+    selected = _read_selected_device()
+    if selected and selected in devices:
+        return selected
+
+    if len(devices) == 1:
+        _write_selected_device(devices[0])
+        return devices[0]
+
+    chosen = _pick_device_dialog(parent, devices) if parent else None
+    if chosen:
+        _write_selected_device(chosen)
+        return chosen
+
+    if parent:
+        ConfirmDialog(parent, "提示", f"检测到多个设备，请先完成设备选择后再执行：{action_name}").exec_confirm()
+    return None
+def _resolve_target_for_fastboot(parent=None, action_name="该功能"):
+    """
+    fastboot动作优先沿用已选序列号；
+    若还未选过，则尝试从当前ADB设备中引导选择一次。
+    """
+    selected = _read_selected_device()
+    if selected:
+        return selected
+    return _ensure_adb_target(parent, action_name)
+
+
+def _adb_run_raw(args, device=None, timeout=12):
+    if not isinstance(args, list):
+        args = [args]
+    paths = _get_runtime_paths()
+    _warmup_adb_server()
+    adb_path = paths["adb_path"]
+    if not _tool_exists(adb_path):
+        raise FileNotFoundError(adb_path)
+
+    cmd = [adb_path]
+    if device:
+        cmd += ["-s", device]
+    cmd += args
+    return subprocess.run(
+        cmd,
+        shell=False,
+        timeout=timeout,
+        capture_output=True,
+        encoding="utf-8",
+        errors="ignore",
+    )
+
+
+def _extract_wireless_ip_from_route(route_text):
+    if not route_text:
+        return None
+    lines = [line.strip() for line in route_text.splitlines() if line.strip()]
+    src_pattern = re.compile(r"\bsrc\s+(\d{1,3}(?:\.\d{1,3}){3})\b")
+
+    for line in lines:
+        if "dev ccmni1" in line:
+            match = src_pattern.search(line)
+            if match:
+                return match.group(1)
+
+    for line in lines:
+        match = src_pattern.search(line)
+        if match:
+            return match.group(1)
+
+    return None
+
+
+def _resolve_usb_target_for_wireless(parent=None):
+    devices = adb_get_devices(parent) or []
+    usb_devices = [d for d in devices if ":" not in d and not d.startswith("emulator-")]
+    if not usb_devices:
+        if parent:
+            ConfirmDialog(parent, "错误提示", "未检测到可用于无线连接的 USB 设备，请先插线并开启USB调试。").exec_confirm()
+        return None
+
+    selected = _read_selected_device()
+    if selected and selected in usb_devices:
+        return selected
+
+    if len(usb_devices) == 1:
+        return usb_devices[0]
+
+    chosen = _pick_device_dialog(parent, usb_devices) if parent else None
+    if chosen:
+        _write_selected_device(chosen)
+    return chosen
+
+
+def _normalize_adb_target(target):
+    if not target:
+        return None
+    value = target.strip()
+    if not value:
+        return None
+    if ":" in value:
+        return value
+    return f"{value}:5555"
+def _ask_directory_with_input(parent, title, tip_text, default_path="D:/backup"):
+    dialog = QDialog(parent)
+    dialog.setWindowTitle(title)
+    dialog.setMinimumSize(520, 190)
+    if parent and not parent.windowIcon().isNull():
+        dialog.setWindowIcon(parent.windowIcon())
+
+    layout = QVBoxLayout(dialog)
+    layout.setContentsMargins(16, 14, 16, 14)
+    layout.setSpacing(10)
+
+    tip = QLabel(tip_text)
+    tip.setWordWrap(True)
+    layout.addWidget(tip)
+
+    row = QHBoxLayout()
+    path_edit = QLineEdit(default_path)
+    browse = QPushButton("选择目录")
+    row.addWidget(path_edit, 1)
+    row.addWidget(browse)
+    layout.addLayout(row)
+
+    btn_row = QHBoxLayout()
+    btn_row.addStretch()
+    ok_btn = QPushButton("确定")
+    cancel_btn = QPushButton("取消")
+    btn_row.addWidget(ok_btn)
+    btn_row.addWidget(cancel_btn)
+    layout.addLayout(btn_row)
+
+    def do_browse():
+        selected = QFileDialog.getExistingDirectory(parent, "选择目录", path_edit.text().strip() or default_path)
+        if selected:
+            path_edit.setText(selected)
+
+    browse.clicked.connect(do_browse)
+    ok_btn.clicked.connect(dialog.accept)
+    cancel_btn.clicked.connect(dialog.reject)
+
+    if dialog.exec() != QDialog.Accepted:
+        return None
+
+    value = path_edit.text().strip()
+    if not value:
+        QMessageBox.warning(parent, "提示", "目录不能为空")
+        return None
+    return value
 
 # 镜像选择窗口
 class CheckListDialog(QDialog):
@@ -248,10 +654,11 @@ class ConfirmDialog(QtWidgets.QMessageBox):
 
         self.setWindowTitle(title)
         self.setText(text)
+        self.setTextFormat(Qt.PlainText)
         self.setIcon(QtWidgets.QMessageBox.Question)
 
         # 设置字体
-        font = QtGui.QFont("微软雅黑", 11)
+        font = _build_dialog_font(11)
         self.setFont(font)
 
         # 自定义按钮
@@ -261,15 +668,20 @@ class ConfirmDialog(QtWidgets.QMessageBox):
         # 美化按钮
         self._style_buttons()
 
-        # 设置圆角和阴影
+        # 设置圆角和文本样式（避免使用过重字重导致发虚）
         self.setStyleSheet("""
             QMessageBox {
                 border-radius: 12px;
             }
-            QLabel {
+            QLabel#qt_msgbox_label {
                 padding: 10px;
+                font-family: "Microsoft YaHei UI";
+                font-size: 12px;
+                font-weight: 400;
+                color: #1d1d1d;
             }
         """)
+        self._polish_text_label()
 
     def _style_buttons(self):
         # 设置按钮样式
@@ -315,11 +727,14 @@ class ConfirmDialog(QtWidgets.QMessageBox):
         self.exec()
         return self.clickedButton() == self.btn_yes
 
-
+    def _polish_text_label(self):
+        label = self.findChild(QLabel, "qt_msgbox_label")
+        if label is not None:
+            label.setFont(_build_dialog_font(11, QFont.Normal))
 
 def open_scrcpy(self):
     dialog = QDialog(self)
-    dialog.setWindowTitle("投屏方式选择")
+    dialog.setWindowTitle("投屏控制")
 
     if self and not self.windowIcon().isNull():
         dialog.setWindowIcon(self.windowIcon())
@@ -334,21 +749,40 @@ def open_scrcpy(self):
         scale = 1.0
         dialog_width, dialog_height = 360, 240
 
-    dialog.resize(dialog_width, dialog_height)
-    dialog.setMinimumSize(320, 220)
+    dialog.resize(max(dialog_width, 460), max(dialog_height, 300))
+    dialog.setMinimumSize(460, 300)
 
     layout = QVBoxLayout(dialog)
-    layout.setContentsMargins(20, 18, 20, 18)
-    layout.setSpacing(12)
+    layout.setContentsMargins(18, 16, 18, 16)
+    layout.setSpacing(10)
 
-    title = QLabel("请选择投屏方式:")
+    title = QLabel("请选择投屏模式")
     title.setFont(QFont("Microsoft YaHei UI", max(13, int(round(15 * scale))), QFont.Bold))
     title.setWordWrap(True)
-    title.setStyleSheet("margin-bottom: 6px;")
+    title.setStyleSheet("margin-bottom: 4px;")
     layout.addWidget(title)
 
-    button_font = QFont("Microsoft YaHei UI", max(11, int(round(13 * scale))))
-    button_min_height = max(48, int(round(54 * scale)))
+    selected = _read_selected_device() or "自动（未指定）"
+    selected_label = QLabel(f"当前目标设备：{selected}")
+    selected_label.setStyleSheet("color:#555;")
+    layout.addWidget(selected_label)
+
+    mode_row = QHBoxLayout()
+    mode_row.addWidget(QLabel("连接方式"))
+    mode_combo = QComboBox()
+    mode_combo.addItems(["有线模式", "无线模式"])
+    mode_row.addWidget(mode_combo, 1)
+    layout.addLayout(mode_row)
+
+    audio_row = QHBoxLayout()
+    audio_row.addWidget(QLabel("音频选项"))
+    audio_combo = QComboBox()
+    audio_combo.addItems(["带音频", "不投音频"])
+    audio_row.addWidget(audio_combo, 1)
+    layout.addLayout(audio_row)
+
+    button_font = QFont("Microsoft YaHei UI", max(11, int(round(12 * scale))))
+    button_min_height = max(42, int(round(46 * scale)))
     button_style = """
     QPushButton {
         background-color: #4CAF50;
@@ -363,208 +797,184 @@ def open_scrcpy(self):
     }
     """
 
-    def run_scrcpy(extra_args=None):
-        base_dir = os.getcwd()
-        devices_path = os.path.join(base_dir, "data", "cache", "my_devices.txt")
-
+    def run_scrcpy(mode, with_audio):
+        action_name = f"{mode}投屏"
+        device = _ensure_adb_target(self, action_name)
         cmd = [get_path("tools/bin/scrcpy-win64-v3.3.4/scrcpy.exe")]
 
-        if os.path.exists(devices_path):
-            with open(devices_path, "r", encoding="utf-8") as f:
-                my_device = f.read().strip()
-                cmd += ["-s", my_device]
+        if device:
+            cmd += ["-s", device]
 
-        if extra_args:
-            cmd += extra_args
+        if mode == "无线模式":
+            # scrcpy v3.3.4: --bit-rate 已移除，改为 --video-bit-rate
+            # 游戏无线投屏：在清晰度与稳定性间平衡，尽量减少复杂画面卡顿。
+            cmd += ["--tcpip", "--video-bit-rate", "10M", "--max-fps", "60"]
+        if not with_audio:
+            cmd += ["--no-audio"]
 
         subprocess.Popen(cmd)
+        dialog.accept()
 
-    # 按钮1
-    button1 = QPushButton("有线投屏（带音频）")
-    button1.setFont(button_font)
-    button1.setMinimumHeight(button_min_height)
-    button1.setCursor(Qt.PointingHandCursor)
-    button1.setStyleSheet(button_style)
-    button1.clicked.connect(lambda: run_scrcpy())
-    layout.addWidget(button1)
+    launch = QPushButton("启动投屏")
+    launch.setFont(button_font)
+    launch.setMinimumHeight(button_min_height)
+    launch.setCursor(Qt.PointingHandCursor)
+    launch.setStyleSheet(button_style)
+    launch.clicked.connect(
+        lambda: run_scrcpy(
+            mode_combo.currentText(),
+            audio_combo.currentText() == "带音频",
+        )
+    )
+    layout.addWidget(launch)
 
-    # 按钮2
-    button2 = QPushButton("有线投屏（不投音频）")
-    button2.setFont(button_font)
-    button2.setMinimumHeight(button_min_height)
-    button2.setCursor(Qt.PointingHandCursor)
-    button2.setStyleSheet(button_style)
-    button2.clicked.connect(lambda: run_scrcpy(["--no-audio"]))
-    layout.addWidget(button2)
+    choose_btn = QPushButton("切换设备")
+    choose_btn.setMinimumHeight(36)
+
+    def refresh_selected_label():
+        selected_label.setText(f"当前目标设备：{_read_selected_device() or '自动（未指定）'}")
+
+    def on_choose_clicked():
+        on_choose_devices_clicked(self)
+        refresh_selected_label()
+
+    choose_btn.clicked.connect(on_choose_clicked)
+    layout.addWidget(choose_btn)
 
     layout.addStretch()
 
     dialog.exec()
 
 def on_choose_devices_clicked(self):
-    adb_get_devices()  # 每次点击按钮时动态刷新
-
-    base_dir = os.getcwd()
-    data_dir = os.path.join(base_dir, "data")
-    devices_path = os.path.join(data_dir, "cache", "devices.txt")
-    my_devices_path = os.path.join(data_dir, "cache", "my_devices.txt")
-
-    # ===== 读取 devices.txt =====
-    if not os.path.exists(devices_path):
-        choice = dialog = ConfirmDialog(self, "错误", "吊毛，我没检测到你插手机了，快检查一下~").exec_confirm()
-        if choice:
-            import requests
-            headers = {
-                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
-                "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8,en-GB;q=0.7,en-US;q=0.6",
-                "Cache-Control": "no-cache",
-                "Connection": "keep-alive",
-                "DNT": "1",
-                "Pragma": "no-cache",
-                "Sec-Fetch-Dest": "document",
-                "Sec-Fetch-Mode": "navigate",
-                "Sec-Fetch-Site": "none",
-                "Sec-Fetch-User": "?1",
-                "Upgrade-Insecure-Requests": "1",
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36 Edg/143.0.0.0",
-                "sec-ch-ua": "\"Microsoft Edge\";v=\"143\", \"Chromium\";v=\"143\", \"Not A(Brand\";v=\"24\"",
-                "sec-ch-ua-mobile": "?0",
-                "sec-ch-ua-platform": "\"Windows\""
-            }
-            cookies = {
-                "user_locale": "zh-CN",
-                "oschina_new_user": "false",
-                "Hm_lvt_24f17767262929947cc3631f99bfd274": "1763381080",
-                "yp_riddler_id": "4d463928-9cb1-4f32-b531-babcfad7966e",
-                "remove_bulletin": "gitee-maintain-1762842849",
-                "remote_way": "http",
-                "abymg_id": "1_2A3C5E6E3DA15CD3087155164604DC6CC6754C3C55963892C9EC260AC783EA08",
-                "BEC": "4431548549a19240b277aa1ec69b0837",
-                "sl-session": "AkFfQaceYWl6X4OOcvk+Wg==",
-                "sl-challenge-server": "cloud",
-                "user_return_to_0": "%2F",
-                "tz": "Asia%2FShanghai",
-                "remember_user_token": "BAhbCFsGaQPYc%2FpJIiIkMmEkMTAkbFkvLlU4ZDhKNXZ0SmpYOWdRWkk5LgY6BkVUSSIXMTc2Nzg4NjEzMC42MTMzNjExBjsARg%3D%3D--fd016cfd0f5aeb634aa84889139b3d976fe8eb6c",
-                "gitee_user": "true",
-                "csrf_token": "zQ%2FgBvbzoX9GNWFjVTIg1FDgqh777XMdlksvY%2FRrmsdPvrcAbwPCLbQScJ5DSS%2BbqX5Jtp5KJ6Xi%2FnQV%2FUXedg%3D%3D",
-                "gitee-session-n": "RFpuZ3FieEpnRmNXVm9VWUV3UDM1bzJwc1U5YW1EMEdOTitwR1N6QWQrZDIzbm0xa21tbGo4M2ttMHRtYkltblV3eklLM3Q1RU9mRW1xc2o3Q2ZxRk03dmZJM0s2RlkyUEFyVERUVXd5TlNZNVN3NGJJN1JXZ1BnQ3JMWCs2bkdoSUdSemt4NmlsOGk1QzNJL280cktGdUI1K25YMDQ2MUY2QVpwYzYyeXE1ejhqdFdFcUV6dkdSSnJPb0ZLSzNQRGtMUTZSdCt4WkhQSDJZNU83QWVQSE9FRSsxRlNXVVBXcUZYOExQV3A3OTJrY201dm9nd2R5ODdlbGg1eVZRZ0pQUDNTbHR3cTM0L0N3Vjd2NkFrNXNobWZxVVRMYlRJY05GTnJJeVFiR1NTNDljY0tHTUhQazJkT2pyMjlKeFhoejcrU0RSeXJ2WmtMU3lXNjIxSVFFUUhOaUlTZFpHNzV1ZFYrRTZSVkw0Nm5JNTF2Qlpqa2NxbjJKS2pGRzEzUmtVMUp1TmNXNGtJeGJCL3FKZTlyZ1lPRk9jUzdBZ0JpdkhQbVJJdzVnaEY0c0Z4ek5jYy8yZk15TStHeStONDlmK1JIWlVKVm5YSXlyRjdZcy95aHdRUUxra3FGUU9MZVQwdndUelNTL1NINDQ1KytVQnUxbENNMkVPZElZcys3U0lLNnppeHRzZkJzMGxJazhNYjU0R1R6YVRpWHp5ZUJ6NW14V3JRTzdGN2hQWEYrRXh2MzNsVnQ1YThVVHlKTnBUQjVWVzk2d0Vnd2l4MUF3Z2RoZUYxZkxCQkJOcTdEZ0Q2dGpSUW41Nzk4VVluOHJTcml0Q3dCUW9INHM3Uy0ta0gzbUlQQVJPTDZ3ZDBaZ2pWNjdHdz09--45c70173bd7ed17421ff42d008bf578d60811dc7"
-            }
-            url = "https://gitee.com/jitianovo/my-server-rp/raw/master/%E6%89%93%E5%BC%80usb%E6%95%99%E5%AD%A6QQ%E5%BD%95%E5%B1%8F20260108230948%20.mp4"
-
-            save_path = os.path.join(os.path.expanduser("~"),'PyCache',"usb.mp4")
-            fail_txt = os.path.join(os.path.expanduser("~"),'PyCache',"read.txt")
-
-            # ---------- 情况 1：文件已存在 ----------
-            if os.path.exists(save_path):
-                print("文件已存在，直接打开视频")
-                os.startfile(save_path)
-                return
-
-            print("文件不存在，开始下载...")
-            try:
-                response = requests.get(url, headers=headers, cookies=cookies)
-                downloaded = 0
-                total = int(response.headers.get("Content-Length", 0))
-                with open(save_path, "wb") as f:
-                    for chunk in response.iter_content(chunk_size=1024 * 1024):
-                        if not chunk:
-                            continue
-                        f.write(chunk)
-                        downloaded += len(chunk)
-                        if total:
-                            print(f"下载中: {downloaded / 1024 / 1024:.2f} MB / {total / 1024 / 1024:.2f} MB", end="\r")
-
-                print("\n下载完成，打开视频")
-
-                os.startfile(save_path)
-
-
-            # ---------- 情况 3：下载失败 ----------
-            except Exception as e:
-                print("下载失败:", e)
-                print("生成 read.txt")
-                with open(fail_txt, "w", encoding="utf-8") as f:
-                    f.write(
-                        "如何打开USB调试 使用超级白工具箱的投屏或者ADB相关功能\n\n"
-                        "第一步：打开【开发者选项】\n\n"
-                        "打开 设置\n"
-                        "找到 关于手机 / 关于设备\n"
-                        "找到 版本号\n"
-                        "连续点 7 次版本号\n"
-                        "提示：\n"
-                        "“您已处于开发者模式”\n\n"
-                        "如果要输入锁屏密码，输就是了，别慌。\n\n"
-                        "第二步：打开【USB 调试】\n\n"
-                        "返回 设置首页\n"
-                        "找到 开发者选项\n"
-                        "（有的在：设置 → 更多设置 → 开发者选项）\n"
-                        "打开 USB 调试\n"
-                        "弹窗提示 → 点 确定\n\n"
-                        "第三步\n"
-                        "用数据线插电脑\n"
-                        "下拉手机状态栏，找到 USB 选项\n"
-                        "选择 文件传输 / 传输文件 / MTP\n"
-                        "手机弹窗询问是否允许 USB 调试 → 勾选 始终允许 → 确定\n\n"
-                        "小贴士（避免新手翻车）\n\n"
-                        "数据线必须是 支持数据传输 的，不是充电线\n"
-                        "USB 模式没切到“传输文件”，电脑可能识别不到\n"
-                        "USB 调试没开，电脑无法操作手机文件\n"
-                    )
-                # 用记事本打开
-                os.system(f'notepad "{fail_txt}"')
-            return
-        else:
-            print('取消操作')
-            return
-
-
-    with open(devices_path, "r", encoding="utf-8") as f:
-        devices = [line.strip() for line in f if line.strip()]
-
+    devices = adb_get_devices(self)
     if not devices:
-        QMessageBox.information(self, "提示", "devices.txt 中没有任何设备")
+        ConfirmDialog(self, "错误提示", "未检测到 ADB 设备，请检查 USB 调试与数据线连接。").exec_confirm()
         return
 
-    # ===== 设备选择对话框 =====
+    if len(devices) == 1:
+        _write_selected_device(devices[0])
+        QMessageBox.information(self, "完成", f"当前已锁定设备：{devices[0]}")
+        return
+
+    chosen = _pick_device_dialog(self, devices)
+    if chosen:
+        _write_selected_device(chosen)
+        QMessageBox.information(self, "完成", f"当前已锁定设备：{chosen}")
+
+
+def adb_wireless_manager(self):
     dialog = QDialog(self)
-    dialog.setWindowTitle("选择设备")
-    dialog.setFixedSize(360, 300)
+    dialog.setWindowTitle("连接无线设备")
+    dialog.setMinimumSize(520, 280)
+    if self and not self.windowIcon().isNull():
+        dialog.setWindowIcon(self.windowIcon())
 
     layout = QVBoxLayout(dialog)
-    layout.setContentsMargins(20, 20, 20, 20)
-    layout.setSpacing(12)
+    layout.setContentsMargins(16, 14, 16, 14)
+    layout.setSpacing(10)
 
-    title = QLabel("请选择要使用的设备：")
-    title.setAlignment(Qt.AlignCenter)
-    title.setStyleSheet("font-size:16px;font-weight:bold;")
-    layout.addWidget(title)
+    tip = QLabel(
+        "连接：先通过USB识别设备，自动读取手机IP并执行 tcpip/connect。\n"
+        "断开：输入已连接的无线设备IP（例如 10.96.39.178）后执行断开。"
+    )
+    tip.setWordWrap(True)
+    tip.setStyleSheet("color: #444;")
+    layout.addWidget(tip)
 
-    def choose_device(dev):
-        os.makedirs(data_dir, exist_ok=True)
-        with open(my_devices_path, "w", encoding="utf-8") as f:
-            f.write(dev)
-        print(f"[Debug] 当前设备: {dev}")
-        QMessageBox.information(self, "完成", f"已选择设备：{dev}")
-        dialog.accept()
+    selected_label = QLabel(f"当前设备选择：{_read_selected_device() or '自动（未指定）'}")
+    selected_label.setStyleSheet("color:#555;")
+    layout.addWidget(selected_label)
 
-    # ===== 动态生成按钮 =====
-    for dev in devices:
-        btn = QPushButton(dev)
-        btn.setCursor(Qt.PointingHandCursor)
-        btn.setStyleSheet("""
-            QPushButton {
-                padding: 10px;
-                border-radius: 6px;
-                background: #F0F0F0;
-                border: 1px solid #CCC;
-                text-align: center;
-            }
-            QPushButton:hover {
-                background: #E6F0FF;
-            }
-        """)
-        btn.clicked.connect(lambda _, d=dev: choose_device(d))
-        layout.addWidget(btn)
+    connect_row = QHBoxLayout()
+    connect_row.addWidget(QLabel("连接目标"))
+    connect_target_edit = QLineEdit()
+    connect_target_edit.setReadOnly(True)
+    connect_target_edit.setPlaceholderText("点击“连接”后自动填充为检测到的IP")
+    connect_row.addWidget(connect_target_edit, 1)
+    layout.addLayout(connect_row)
+
+    ip_row = QHBoxLayout()
+    ip_row.addWidget(QLabel("断开目标"))
+    ip_edit = QLineEdit()
+    ip_edit.setPlaceholderText("例如：10.96.39.178 或 10.96.39.178:5555")
+    ip_row.addWidget(ip_edit, 1)
+    layout.addLayout(ip_row)
+
+    log_label = QLabel("状态：等待操作")
+    log_label.setWordWrap(True)
+    log_label.setStyleSheet("color: #1d1d1d;")
+    layout.addWidget(log_label)
+
+    btn_row = QHBoxLayout()
+    btn_connect = QPushButton("连接")
+    btn_disconnect = QPushButton("断开")
+    btn_close = QPushButton("关闭")
+    btn_row.addWidget(btn_connect)
+    btn_row.addWidget(btn_disconnect)
+    btn_row.addStretch()
+    btn_row.addWidget(btn_close)
+    layout.addLayout(btn_row)
+
+    def do_connect():
+        target = _resolve_usb_target_for_wireless(self)
+        if not target:
+            return
+
+        try:
+            route_res = _adb_run_raw(["shell", "ip", "route"], device=target, timeout=12)
+        except subprocess.TimeoutExpired:
+            ConfirmDialog(self, "错误提示", "读取设备网络信息超时，请重试。").exec_confirm()
+            return
+
+        route_output = ((route_res.stdout or "") + "\n" + (route_res.stderr or "")).strip()
+        phone_ip = _extract_wireless_ip_from_route(route_output)
+        if not phone_ip:
+            ConfirmDialog(self, "错误提示", "未能从 `adb shell ip route` 中提取手机IP。").exec_confirm()
+            return
+
+        connect_target = _normalize_adb_target(phone_ip)
+        connect_target_edit.setText(connect_target)
+        ip_edit.setText(connect_target)
+
+        try:
+            tcpip_res = _adb_run_raw(["tcpip", "5555"], device=target, timeout=15)
+            connect_res = _adb_run_raw(["connect", connect_target], timeout=15)
+        except subprocess.TimeoutExpired:
+            ConfirmDialog(self, "错误提示", "无线连接命令执行超时，请重试。").exec_confirm()
+            return
+
+        tcpip_out = ((tcpip_res.stdout or "") + "\n" + (tcpip_res.stderr or "")).strip()
+        connect_out = ((connect_res.stdout or "") + "\n" + (connect_res.stderr or "")).strip()
+
+        log_label.setText(
+            f"状态：连接完成\n目标USB设备：{target}\n手机IP：{phone_ip}\n连接目标：{connect_target}\n"
+            f"tcpip结果：{tcpip_out or '无输出'}\nconnect结果：{connect_out or '无输出'}"
+        )
+        QMessageBox.information(
+            self,
+            "连接完成",
+            f"无线连接流程已执行完成。\n设备：{target}\nIP：{phone_ip}\n连接目标：{connect_target}\n\n"
+            f"接下来可以直接使用无线投屏。",
+        )
+
+    def do_disconnect():
+        ip = ip_edit.text().strip()
+        if not ip:
+            ConfirmDialog(self, "提示", "请先输入要断开的设备IP。").exec_confirm()
+            return
+        target = _normalize_adb_target(ip)
+        try:
+            res = _adb_run_raw(["disconnect", target], timeout=10)
+        except subprocess.TimeoutExpired:
+            ConfirmDialog(self, "错误提示", "断开命令执行超时，请重试。").exec_confirm()
+            return
+        output = ((res.stdout or "") + "\n" + (res.stderr or "")).strip()
+        log_label.setText(f"状态：断开执行完成\n目标：{target}\n结果：{output or '无输出'}")
+        QMessageBox.information(self, "完成", f"已执行断开：{target}")
+
+    btn_connect.clicked.connect(do_connect)
+    btn_disconnect.clicked.connect(do_disconnect)
+    btn_close.clicked.connect(dialog.accept)
 
     dialog.exec()
 
@@ -573,12 +983,26 @@ def open_adb(self):
                      creationflags=subprocess.CREATE_NEW_CONSOLE)
 
 def backup_IMG(self):
+    device = _ensure_adb_target(self, "一键备份基带")
+    if not device:
+        return
+
+    backup_dir = _ask_directory_with_input(
+        self,
+        "备份输出目录",
+        "请指定本次基带镜像备份到电脑的目录（可手动输入或点击选择）。",
+        "",
+    )
+    if not backup_dir:
+        return
+    os.makedirs(backup_dir, exist_ok=True)
+
     box = QMessageBox(self)
     box.setWindowTitle("高危功能提示 - 基带备份")
-    box.setText("""
+    box.setText(f"""
     <b>请确认以下事项：</b><br><br>
-    • 手机已通过 <b>USB</b> 连接电脑<br>
-    • 备份镜像将保存至 <b>D:/backup</b><br><br>
+    • 目标设备：<b>{device}</b><br>
+    • 备份目录：<b>{backup_dir}</b><br><br>
     <b>请选择备份模式：</b><br>
      ①防格机镜像备份（完整）<br>
      ②面具修补还原镜像（部分）
@@ -600,25 +1024,14 @@ def backup_IMG(self):
     box.exec()
     clicked = box.clickedButton()
 
-    #使用此函数先进行设备有无连接的判断
-    info = adb_get_devices()
-    if info == None and not clicked == btn_cancel: # 当点击A/B时出现，C不出现
-        dialog = ConfirmDialog(self,'错误提示','获取设备失败')
-        dialog.exec_confirm()
-        return -1
+    if clicked == btn_cancel:
+        return
 
-    # 路径
-    backup_dir = "D:/backup"
-    os.makedirs(backup_dir, exist_ok=True)
-    #兼容联发科骁龙双cpu
-    cpu = adb_commander(['shell', 'su -c', '"cd /dev/block/bootdevice/by-name && ls -1"'])
-    if not cpu == None:
-        byname = 'bootdevice/by-name'
-    else:
-        byname = 'by-name'
+    cpu = adb_commander(['shell', 'su -c', '"cd /dev/block/bootdevice/by-name && ls -1"'], device=device)
+    byname = 'bootdevice/by-name' if cpu else 'by-name'
 
     if clicked == btn_full: # 防格机备份就是备份整个基带目录，但是排除掉一些不必要的分区，避免占用过大空间
-        result = adb_commander(['shell', 'su -c', f'"cd /dev/block/{byname} && ls -1"'])  # 得到基带目录名
+        result = adb_commander(['shell', 'su -c', f'"cd /dev/block/{byname} && ls -1"'], device=device)  # 得到基带目录名
         result = result.strip().splitlines()
         # 要删除的元素
         to_remove = ['bootloader1','bootloader2','userdata','sda','sdb','sdc']
@@ -632,28 +1045,28 @@ def backup_IMG(self):
             result = windows.choose
             print("已选择刷入镜像", result)
             # 创建临时目录
-            adb_commander(["shell", "su -c 'mkdir -p /sdcard/tmp'"])
+            adb_commander(["shell", "su -c 'mkdir -p /sdcard/tmp'"], device=device)
             for file_name in result:
                 # dd 备份到手机临时目录
                 res = adb_commander([
                     "shell",
                     f"su -c 'dd if=/dev/block/{byname}/{file_name} of=/sdcard/tmp/{file_name}.img && echo get_done'"
-                ])
+                ], device=device)
                 print(f"dd {file_name}:", res)
 
                 # pull 到电脑
                 res2 = adb_commander([
                     "pull",
                     f"/sdcard/tmp/{file_name}.img",
-                    "D:/backup"
-                ])
+                    backup_dir
+                ], device=device)
                 print(f"pull {file_name}:", res2)
 
                 # 删除手机临时文件
                 res3 = adb_commander([
                     "shell",
                     f"su -c 'rm /sdcard/tmp/{file_name}.img && echo removed_done'"
-                ])
+                ], device=device)
                 print(f"rm {file_name}:", res3)
             dlg = ConfirmDialog(self, "确认", "备份完毕，请确认！")
             dlg.exec_confirm()
@@ -667,7 +1080,7 @@ def backup_IMG(self):
         ]
 
         # 创建临时目录
-        adb_commander(["shell", "su -c 'mkdir -p /sdcard/tmp'"])
+        adb_commander(["shell", "su -c 'mkdir -p /sdcard/tmp'"], device=device)
 
         # 循环备份
         for file_name in files_name:
@@ -675,49 +1088,69 @@ def backup_IMG(self):
             res = adb_commander([
                 "shell",
                 f"su -c 'dd if=/dev/block/{byname}/{file_name} of=/sdcard/tmp/{file_name}.img && echo get_done'"
-            ])
+            ], device=device)
             print(f"dd {file_name}:", res)
 
             # pull 到电脑
             res2 = adb_commander([
                 "pull",
                 f"/sdcard/tmp/{file_name}.img",
-                "D:/backup"
-            ])
+                backup_dir
+            ], device=device)
             print(f"pull {file_name}:", res2)
 
             # 删除手机临时文件
             res3 = adb_commander([
                 "shell",
                 f"su -c 'rm /sdcard/tmp/{file_name}.img && echo removed_done'"
-            ])
+            ], device=device)
             print(f"rm {file_name}:", res3)
         dialog = ConfirmDialog(self, "确认", "面具原镜像备份成功，请确认！").exec_confirm()
         print("面具原镜像备份成功")
-    elif clicked == btn_cancel:
-        print("已取消操作")
-
 
 def restore_IMG(self):
-    os.makedirs('D:/backup', exist_ok=True)
-    img = os.listdir('D:/backup')
+    device = _ensure_adb_target(self, "一键还原基带")
+    if not device:
+        return
+
+    restore_dir = _ask_directory_with_input(
+        self,
+        "还原镜像目录",
+        "请指定包含镜像文件的目录（可手动输入或点击选择）。",
+        "",
+    )
+    if not restore_dir:
+        return
+    os.makedirs(restore_dir, exist_ok=True)
+    img = [x for x in os.listdir(restore_dir) if x.lower().endswith(".img")]
     if not img:
-        info = ConfirmDialog(self,'错误提示','请把镜像文件放入\nD:/backup')
+        info = ConfirmDialog(self,'错误提示',f'请把镜像文件放入\n{restore_dir}')
         info.exec_confirm()
         return
     windows = CheckListDialog(self, img)  # 自动继承父窗口图标
     img = windows.choose
     for i in img:
         name = i.split('.')[0]
-        fastboot_commander(f'flash {name} D:/{name}.img')
+        full_path = os.path.join(restore_dir, i)
+        result = fastboot_commander(['flash', name, full_path], device=device)
         print(f"刷入成功{name}") if result else print(f'刷入失败{name}')
 
-
 def flash_boot(self):
+    selected_fastboot_device = _resolve_target_for_fastboot(self, "[FB]一键刷入boot.img")
+    boot_dir = _ask_directory_with_input(
+        self,
+        "boot镜像目录",
+        "请指定 boot 镜像所在目录（可手动输入或点击选择）。",
+        "",
+    )
+    if not boot_dir:
+        return
+    os.makedirs(boot_dir, exist_ok=True)
+
     box = QMessageBox(self)
     box.setWindowTitle("【高危操作】⚠若操作不当将会变砖哦~")
     box.setText(
-        "请确保手机处于fastboot模式下\n将镜像文件放入D:/backup\n文件名是init_boot_a/b.img\n请选择刷入分区\n您可以选择init_boot_a或init_boot_b分区\n手动刷入时\n请把有且一个镜像文件放入D:/backup\n文件名就是刷入分区名")
+        f"请确保手机处于fastboot模式下\n当前镜像目录：{boot_dir}\n文件名是init_boot_a/b.img\n请选择刷入分区\n您可以选择init_boot_a或init_boot_b分区\n手动刷入时\n请把有且仅有一个镜像文件放入该目录\n文件名就是刷入分区名")
     font = QFont("Microsoft YaHei UI", 12)  # 字体"微软雅黑"，字号12，可改大
     box.setFont(font)
     btn_boot_A = box.addButton("刷入init_boot_a", QMessageBox.ActionRole)
@@ -727,23 +1160,32 @@ def flash_boot(self):
     box.exec()
     clicked = box.clickedButton()
     if clicked == btn_boot_A:
-        result = fastboot_commander('flash init_boot_a D:/init_boot_a.img')
+        result = fastboot_commander(
+            ['flash', 'init_boot_a', os.path.join(boot_dir, 'init_boot_a.img')],
+            device=selected_fastboot_device
+        )
         print("刷入成功A") if result else print('刷入失败')
     elif clicked == btn_boot_B:
-        result = fastboot_commander('flash init_boot_b D:/init_boot_b.img')
+        result = fastboot_commander(
+            ['flash', 'init_boot_b', os.path.join(boot_dir, 'init_boot_b.img')],
+            device=selected_fastboot_device
+        )
         print("刷入成功B") if result else print('刷入失败')
     elif clicked == btn_boot_C:
-        os.makedirs('D:/backup', exist_ok=True)
-        path = os.listdir('D:/backup')
+        path = [x for x in os.listdir(boot_dir) if x.lower().endswith(".img")]
         if not path:
-            dialog = ConfirmDialog(self,'错误','D:/backup 目录下未发现镜像文件')
-            result = dialog.exec_confirm()
-            return result
-        elif 'img' in path[0] and len(path) == 1:
+            dialog = ConfirmDialog(self,'错误',f'{boot_dir} 目录下未发现镜像文件')
+            dialog.exec_confirm()
+            return
+        elif len(path) == 1:
             name = path[0].split('.')[0]
         else:
-            print('D:/img img文件只能为1个')
-        result = fastboot_commander(f'flash {name} D:/{name}.img')
+            ConfirmDialog(self, '错误', '手动刷入模式下，img文件只能为1个').exec_confirm()
+            return
+        result = fastboot_commander(
+            ['flash', name, os.path.join(boot_dir, path[0])],
+            device=selected_fastboot_device
+        )
         print(f"刷入成功{name}") if result else print(f'刷入失败{name}')
     elif clicked == btn_cancel:
         print("已取消操作")
@@ -752,7 +1194,8 @@ def flash_boot(self):
 ###################安装apk↓#######################
 
 def install_apks(preselect_list=None):
-    dlg = ApkInstallWindow(get_path("tools/android"), get_path("tools/adb-fastboot/adb.exe"), preselect_list)
+    paths = _get_runtime_paths()
+    dlg = ApkInstallWindow(get_path("tools/android"), paths["adb_path"], preselect_list)
     dlg.exec()
 
 def install_environment_apks(self):
@@ -790,8 +1233,8 @@ def Leetiaotiao(self):
 
 # 文件发送处理
 def send_files(preselect_list=None):
-
-    dlg = FileSendWindow(get_path("tools/android"), get_path("tools/adb-fastboot/adb.exe"), preselect_list)
+    paths = _get_runtime_paths()
+    dlg = FileSendWindow(get_path("tools/android"), paths["adb_path"], preselect_list)
     dlg.exec()
 
 def send_al_environment_files(self):
@@ -810,92 +1253,126 @@ def send_su_environment_files(self):
 
 # adb-fastboot核心功能
 
-def adb_get_devices():
+def adb_get_devices(parent=None):
     """
     返回devices列表
     把结果写入硬盘，作为选择设备的前置函数
     也可在任意需要使用adb命令前进行设备判断
     """
     listDevices = []
-
-    base_dir = os.getcwd()
-    # print('[Debug]',base_dir)
-    if "libs" in base_dir:  # 消除路径中的/libs
-        base_dir = os.path.dirname(os.getcwd())
-
-    data_dir = os.path.join(base_dir, "data")
-    adb_path = os.path.join(base_dir, "tools", "adb-fastboot", 'adb.exe')
-
-    result = subprocess.run(fr"{adb_path} devices", shell=True, encoding='gbk', capture_output=True)
-    for line in result.stdout.splitlines()[1:]:  # 处理原始返回结果
-        if 'device' in line:
-            listDevices.append(line.split('	device')[0])
-        if len(listDevices) == 0:  # 如果没有设备
-            import shutil  # 初始化检测，如果没有设备把上次的设备文件全部删除
-            if os.path.exists(os.path.join(data_dir, "cache")):
-                shutil.rmtree(os.path.join(data_dir, "cache"))  # 删除整个文件夹及内容
-            return None
-    if not os.path.exists(os.path.join(data_dir, "cache")):
-        os.mkdir(os.path.join(data_dir, "cache"))
-    with open(os.path.join(data_dir, "cache", 'devices.txt'), 'w+', encoding='utf-8') as f:  # 初始化写入本地
-        for device in listDevices:
-            f.write(device + '\n')
-    return listDevices
-def adb_commander(args):
-    if type(args) is not list:
-        args = [args]
-
-    base_dir = os.getcwd()
-    if "libs" in base_dir:
-        base_dir = os.path.dirname(base_dir)
-
-    adb_path = os.path.join(base_dir, "tools", "adb-fastboot", "adb.exe")
+    paths = _get_runtime_paths()
+    _warmup_adb_server()
+    adb_path = paths["adb_path"]
+    if not _tool_exists(adb_path):
+        if parent:
+            _show_missing_tool_message(parent, "adb", adb_path)
+        else:
+            print(f"未找到 adb 可执行文件: {adb_path}")
+        return None
 
     try:
         result = subprocess.run(
-            [adb_path] + args,
+            [adb_path, "devices"],
+            shell=False,
+            encoding='utf-8',
+            errors='ignore',
+            capture_output=True
+        )
+    except FileNotFoundError:
+        if parent:
+            _show_missing_tool_message(parent, "adb", adb_path)
+        else:
+            print(f"adb 启动失败（FileNotFoundError）: {adb_path}")
+        return None
+    for line in result.stdout.splitlines()[1:]:  # 处理原始返回结果
+        if '\tdevice' in line:
+            listDevices.append(line.split('\tdevice')[0].strip())
+
+    if len(listDevices) == 0:  # 如果没有设备
+        if os.path.exists(paths["cache_dir"]):
+            shutil.rmtree(paths["cache_dir"])  # 删除整个文件夹及内容
+        return None
+
+    os.makedirs(paths["cache_dir"], exist_ok=True)
+    with open(paths["devices_path"], 'w+', encoding='utf-8') as f:  # 初始化写入本地
+        for device in listDevices:
+            f.write(device + '\n')
+    return listDevices
+def adb_commander(args, device=None):
+    if type(args) is not list:
+        args = [args]
+
+    paths = _get_runtime_paths()
+    _warmup_adb_server()
+    adb_path = paths["adb_path"]
+    if not _tool_exists(adb_path):
+        print(f"adb_commander 未找到 adb: {adb_path}")
+        return ""
+
+    cmd = [adb_path]
+    if device:
+        cmd += ["-s", device]
+    cmd += args
+
+    try:
+        result = subprocess.run(
+            cmd,
             capture_output=True,
             encoding="utf-8",
             errors="ignore"
         )
         return result.stdout
+    except FileNotFoundError:
+        print(f"adb_commander 启动失败（FileNotFoundError）: {adb_path}")
+        return ""
     except Exception as e:
         print("adb_commander 调用失败:", e)
-        return subprocess.CompletedProcess([adb_path] + args, returncode=1, stdout="", stderr=str(e))
-def fastboot_commander(command):
-    base_dir = os.getcwd()
-    if "libs" in base_dir:
-        base_dir = os.path.dirname(base_dir)
-
-    fastboot_path = os.path.join(
-        base_dir, "tools", "adb-fastboot", "fastboot.exe"
-    )
+        return ""
+def fastboot_commander(command, device=None):
+    paths = _get_runtime_paths()
+    fastboot_path = paths["fastboot_path"]
+    if not _tool_exists(fastboot_path):
+        print(f"fastboot_commander 未找到 fastboot: {fastboot_path}")
+        return None
 
     try:
+        args = command if isinstance(command, list) else str(command).split()
+        cmd = [fastboot_path]
+        if device:
+            cmd += ["-s", device]
+        cmd += args
         result = subprocess.run(
-            [fastboot_path, command],
+            cmd,
             shell=False,
-            timeout=0.3,
+            timeout=3,
             capture_output=True,
-            encoding="gbk"
+            encoding="utf-8",
+            errors="ignore"
         )
-        return result.stdout.strip() if result.stdout else None
+        output = (result.stdout or "") + (result.stderr or "")
+        return output.strip() if output else None
 
+    except FileNotFoundError:
+        print(f"fastboot 启动失败（FileNotFoundError）: {fastboot_path}")
+        return None
     except subprocess.TimeoutExpired:
         print("未检测到 fastboot 设备")
         return None
 
 def adb_reboot(self):
+    device = _ensure_adb_target(self, "ADB重启设备")
+    if not device:
+        return
     dlg = ConfirmDialog(self, "确认", "是否继续？")
     result = dlg.exec_confirm()
     if result:
-        adb_commander('reboot')
+        adb_commander(['reboot'], device=device)
 
 def fastboot_reboot(self):
     dlg = ConfirmDialog(self, "确认", "是否继续？")
     result = dlg.exec_confirm()
     if result:
-        fastboot_commander('reboot')
+        fastboot_commander(['reboot'])
 
 def clean_file_dir(dir_path):
     """删除指定目录下的所有文件夹"""
@@ -907,7 +1384,8 @@ def clean_file_dir(dir_path):
 
 # ------------------ 主程序 ------------------
 if __name__ == "__main__":
-    adb_commander(["shell", "find", "/sdcard/", "-maxdepth", "1", "-type", "d"])
+    pass
+    # adb_commander(["shell", "find", "/sdcard/", "-maxdepth", "1", "-type", "d"])
     # 示例调用
     #delete_dirs_with_confirmation("/sdcard")
 

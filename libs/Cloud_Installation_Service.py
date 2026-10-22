@@ -9,9 +9,11 @@ from PySide6.QtWidgets import (
 # ==== 本地模块 ====
 import lanzoui
 import core_lib
+from assets.aira2c.aria2c_api import aria2_download
 ###################云安装↓#######################
 class DownloadThread(QThread):
     progress = Signal(int)  # 百分比
+    error = Signal(str)
     finished = Signal()
 
     def __init__(self, name, exe_name, urls):
@@ -21,62 +23,73 @@ class DownloadThread(QThread):
         self.urls = urls
 
     def run(self):
-        username = os.path.expanduser('~')
-        target_dir = os.path.join(username, "PyCache", self.name)
-        final_exe_path = os.path.join(username, "PyCache", self.exe_name)
+        try:
+            username = os.path.expanduser('~')
+            target_dir = os.path.join(username, "PyCache", self.name)
+            final_exe_path = os.path.join(username, "PyCache", self.exe_name)
 
-        os.makedirs(target_dir, exist_ok=True)
+            os.makedirs(target_dir, exist_ok=True)
 
-        total_files = len(self.urls)
-        total_units = total_files * 100  # 每个文件分 100 个单位
-        units_done = 0
+            total_files = len(self.urls)
 
-        for url in self.urls:
-            # 下载分片
-            lanzoui.download_file(url, target_dir)
-            # 平滑更新进度条
-            for i in range(100):
-                units_done += 1
-                percent = int(units_done / total_units * 100)
-                self.progress.emit(percent)
-                self.msleep(5)  # 每 5ms 更新一次，实现平滑感
+            # 真实进度：每个分片用 aria2 的百分比回调，再换算成整体进度
+            def make_progress_callback(index):
+                def _cb(data):
+                    file_percent = data.get("percent", 0) / 100.0
+                    overall = int((index + file_percent) / total_files * 100)
+                    self.progress.emit(max(0, min(99, overall)))
+                return _cb
 
-        # 如果只有一个文件，直接重命名，不执行合并
-        if total_files == 1:
-            # 获取下载的文件（目录中应该只有一个文件）
-            files = os.listdir(target_dir)
-            if files:
-                downloaded_file = os.path.join(target_dir, files[0])
-                # 确保目标目录存在
-                os.makedirs(os.path.dirname(final_exe_path), exist_ok=True)
-                # 移动文件到最终位置
-                if os.path.exists(final_exe_path):
-                    os.remove(final_exe_path)
-                shutil.move(downloaded_file, final_exe_path)
-                print(f"单个文件已移动: {downloaded_file} -> {final_exe_path}")
-        else:
-            # 多个文件才执行合并
-            core_lib.merge_file(target_dir, os.path.join(username, "PyCache"))
-            print(f"多个文件已合并到: {final_exe_path}")
+            for idx, url in enumerate(self.urls):
+                direct = lanzoui.get_direct_link(url)
+                if not direct:
+                    raise RuntimeError(f"蓝奏直链解析失败：{url}")
+                aria2_download(
+                    url=direct,
+                    threads=16,
+                    path=target_dir,
+                    min_split_size="1M",
+                    on_progress=make_progress_callback(idx),
+                )
 
-        self.progress.emit(100)
+            # 如果只有一个文件，直接重命名，不执行合并
+            if total_files == 1:
+                # 获取下载的文件（目录中应该只有一个文件）
+                files = os.listdir(target_dir)
+                if files:
+                    downloaded_file = os.path.join(target_dir, files[0])
+                    # 确保目标目录存在
+                    os.makedirs(os.path.dirname(final_exe_path), exist_ok=True)
+                    # 移动文件到最终位置
+                    if os.path.exists(final_exe_path):
+                        os.remove(final_exe_path)
+                    shutil.move(downloaded_file, final_exe_path)
+                    print(f"单个文件已移动: {downloaded_file} -> {final_exe_path}")
+            else:
+                # 多个文件才执行合并
+                core_lib.merge_file(target_dir, os.path.join(username, "PyCache"))
+                print(f"多个文件已合并到: {final_exe_path}")
 
-        # 删除缓存目录
-        if os.path.exists(target_dir):
-            shutil.rmtree(target_dir)
-            print(f"缓存目录已删除: {target_dir}")
+            self.progress.emit(100)
 
-        # 运行最终文件
-        if os.path.exists(final_exe_path):
-            try:
-                subprocess.Popen(final_exe_path, shell=True)
-                print(f"程序已启动: {final_exe_path}")
-            except Exception as e:
-                print(f"启动程序失败: {e}")
-        else:
-            print(f"错误：最终文件不存在: {final_exe_path}")
+            # 删除缓存目录
+            if os.path.exists(target_dir):
+                shutil.rmtree(target_dir)
+                print(f"缓存目录已删除: {target_dir}")
 
-        self.finished.emit()
+            # 运行最终文件
+            if os.path.exists(final_exe_path):
+                try:
+                    subprocess.Popen(final_exe_path, shell=True)
+                    print(f"程序已启动: {final_exe_path}")
+                except Exception as e:
+                    print(f"启动程序失败: {e}")
+            else:
+                print(f"错误：最终文件不存在: {final_exe_path}")
+
+            self.finished.emit()
+        except Exception as exc:
+            self.error.emit(str(exc))
 
 class InstallDialog(QDialog):
     def __init__(self, name, exe_name, urls, parent=None):
@@ -95,12 +108,19 @@ class InstallDialog(QDialog):
         # 启动下载线程
         self.thread = DownloadThread(name, exe_name, urls)
         self.thread.progress.connect(self.progress_bar.setValue)
+        self.thread.error.connect(self.on_error)
         self.thread.finished.connect(self.on_finished)
         self.thread.start()
 
     def on_finished(self):
         self.label.setText("安装完成！")
         # 自动关闭窗口
+        self.close()
+
+    def on_error(self, msg):
+        from PySide6.QtWidgets import QMessageBox
+        self.label.setText("安装失败")
+        QMessageBox.critical(self, "安装失败", f"下载失败：{msg}")
         self.close()
 
 def install_package(parent, name, exe_name, urls):

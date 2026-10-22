@@ -1,66 +1,122 @@
-from tkinter import messagebox
-import re,sys,subprocess,os,requests,importlib,execjs
+from tkinter import Tk, messagebox
+import re,sys,subprocess,os,random,requests,importlib,execjs
 from assets.aira2c.aria2c_api import aria2_download
+from core_lib import get_path
+def _show_foreground_messagebox(show_dialog, title, message):
+    root = Tk()
+    root.withdraw()
+    try:
+        # 显式置顶父窗口，让 Windows 原生提示框继承置顶层级。
+        root.attributes("-topmost", True)
+        root.update_idletasks()
+        return show_dialog(title, message, parent=root)
+    finally:
+        root.destroy()
 
+def rand_ip():
+    # 生成随机国内IP伪装来源, 否则蓝奏云下载域名会拦截到"网络异常"验证页
+    first = random.choice(['61','66','113','116','117','118','119','120','121','122','123','124','125','171','175','182','183','202','210','211','218','219','220','221','222','223'])
+    return first + '.' + '.'.join(str(random.randint(0,255)) for _ in range(3))
 def get_direct_link(url):
-    # 第0层 获取arg3
+    # 第0层 获取页面：老页面有 arg1 挑战，新页面直接给 iframe fn
     response = requests.get(url)
     response_clear = re.sub(r'\s', '', response.text)
-    arg1 = re.findall("arg1='(.*?)'", response_clear)[0]
-    # print('已捕获 arg1 = ', arg1)
+    fn = re.findall('/fn?(.*?)" frameborder="0" scrolling="no"></iframe>', response.text)
 
-    with open('scripts/func_arg3.js', 'r', encoding='utf-8') as f:
-        js_code = f.read()
-
-    ctx = execjs.compile(js_code)
-    arg3 = ctx.call('main', arg1)
-    # print('已将 arg1 进行逆向算法还原: arg3 = ', arg3)
-
-    cookies = {"acw_sc__v2": arg3}
-    # print('当前为 cookies = ', cookies)
-
-    response3 = requests.get(url, cookies=cookies)
-    # print('原始内容',response3.text)
-    # 第一层 拿fn?
-    fn = re.findall('/fn?(.*?)" frameborder="0" scrolling="no"></iframe>', response3.text)
-    # print('fn:',fn)
+    arg1 = re.findall("arg1='(.*?)'", response_clear)
+    if not fn and arg1:
+        # 老式防护挑战页：先解 acw_sc__v2 cookie 再取 fn
+        with open(get_path('scripts/func_arg3.js'), 'r', encoding='utf-8') as f:
+            js_code = f.read()
+        ctx = execjs.compile(js_code)
+        arg3 = ctx.call('main', arg1[0])
+        cookies = {"acw_sc__v2": arg3}
+        response = requests.get(url, cookies=cookies)
+        fn = re.findall('/fn?(.*?)" frameborder="0" scrolling="no"></iframe>', response.text)
+        if not fn and 'arg1' in response.text:
+            # 防护挑战可能连续出现，重新计算再取一次
+            arg1b = re.findall("arg1='(.*?)'", re.sub(r'\s', '', response.text))
+            if arg1b:
+                arg3 = ctx.call('main', arg1b[0])
+                response = requests.get(url, cookies={"acw_sc__v2": arg3})
+                fn = re.findall('/fn?(.*?)" frameborder="0" scrolling="no"></iframe>', response.text)
+    # print('fn:', fn)
+    if not fn:
+        print("蓝奏页面解析失败：未找到 fn 直链参数")
+        return None
     # 第二层 取出第三步的sign
     url2 = "https://jitianna.lanzoul.com/fn?"+str(fn[0])
     dict1 = {'referer': url}
     response2 = requests.get(url2, data=dict1)
     wp_sign = re.findall("wp_sign = '(.*?)'", response2.text)
+    # 2026-09 接口改版: 解析接口由 ajaxm.php 换为 ajaxfile.php,
+    # websignkey/signs 不再固定为 pg5H, 由 fn 页变量 ajaxdata 提供
+    ajaxdata = re.findall("var ajaxdata = '(.*?)'", response2.text)
+    if ajaxdata:
+        ajax_api = 'ajaxfile.php'
+        websignkey = ajaxdata[0]
+    else:
+        ajax_api = 'ajaxm.php'  # 旧版页面兼容
+        websignkey = 'pg5H'
     # 第三层 取跳转链
-    var = re.findall('var fid = (\\d+);', response3.text)
-    url3 = 'https://jitianna.lanzoul.com/ajaxm.php?file=' + str(var[0])
+    var = re.findall('var fid = (\\d+);', response.text)
+    # ajax 接口域名优先从 fn 页面提取，蓝奏已迁移到 apifile.woozooo.com；
+    # 老域名会返回 407 风控导致下载失败
+    ajax_page = re.findall(r"url\s*:\s*'(https?://[^']*?ajaxfile\.php\?file=\d+)'", response2.text)
+    if ajax_page:
+        url3 = ajax_page[0]
+    else:
+        url3 = 'https://apifile.woozooo.com/' + ajax_api + '?file=' + str(var[0])
 
-    data={"action":"downprocess", "websignkey":"pg5H", "signs":"pg5H","sign":wp_sign,"websign":"","kd":"1","ves":"1" }
+    data={"action":"downprocess", "websignkey":websignkey, "signs":websignkey,"sign":wp_sign,"websign":"","kd":"1","ves":"1" }
     headers={'referer':url2,'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/139.0.0.0 Safari/537.36 Edg/139.0.0.0'}
 
     url4 = requests.post(url3,data=data,headers=headers)
-    download_link=re.findall('url":"?(.*?)","inf":0}',url4.text)
-    #跳转链
-    good_link= 'https://developer-oss.lanrar.com/file/?'+str(download_link[0].replace('\\/','/'))
+    try:
+        msg = url4.json()
+    except ValueError:
+        print("ajax接口返回异常:", url4.text[:200])
+        return None
+    if str(msg.get('zt')) != '1':
+        print("解析失败:", msg.get('inf'))
+        return None
+    # 新版返回 dom+url(url自带?前缀), 旧版url不带?, 统一拼成 dom/file/?xxx
+    dom = str(msg.get('dom') or 'https://developer-oss.lanrar.com').replace('\\/','/')
+    download_link = str(msg.get('url')).replace('\\/','/')
+    if not download_link.startswith('?'):
+        download_link = '?' + download_link
+    good_link = dom + '/file/' + download_link
 
+    # 2026-09: 旧的 developer-oss 固定域名+大段浏览器头已失效,
+    # 跳转链需带随机IP伪装头才返回302真实直链, 否则被拦截到"网络异常"验证页
     headers2 = {
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
-        "Accept-Encoding": "gzip, deflate, br, zstd",
-        "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8,en-GB;q=0.7,en-US;q=0.6",
-        "Connection": "keep-alive",
-        "Cookie": "down_ip=1",
-        "DNT": "1",
-        "Host": "developer-oss.lanrar.com",
-        "Sec-Fetch-Dest": "document",
-        "Sec-Fetch-Mode": "navigate",
-        "Sec-Fetch-Site": "none",
-        "Sec-Fetch-User": "?1",
-        "Upgrade-Insecure-Requests": "1",
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/139.0.0.0 Safari/537.36 Edg/139.0.0.0",
-        "sec-ch-ua": "\"Not;A=Brand\";v=\"99\", \"Microsoft Edge\";v=\"139\", \"Chromium\";v=\"139\"",
-        "sec-ch-ua-mobile": "?0",
-        "sec-ch-ua-platform": "\"Windows\""
+        "Accept": "*/*",
+        "Accept-Language": "zh-cn",
+        "Cookie": "down_ip=1",
+        "referer": "https://jitianna.lanzoul.com/",
+        "X-FORWARDED-FOR": rand_ip(),
+        "CLIENT-IP": rand_ip(),
     }
     #第四层 获取真实直链地址
-    resp = requests.get(good_link, allow_redirects=False,headers=headers2)     # 禁止自动重定向
+    resp = requests.get(good_link, allow_redirects=False, headers=headers2)     # 禁止自动重定向
+
+    # 2026-09: 跳转链可能被 CDN 拦截返回 arg1 挑战页，需解 acw_sc__v2 cookie 后重试；
+    # 挑战可能连续出现多次，循环解算直到拿到 location
+    for _ in range(5):
+        if 'location' in resp.headers:
+            break
+        if "arg1=" not in resp.text:
+            break
+        arg1_c = re.findall("arg1='(.*?)'", re.sub(r'\s', '', resp.text))
+        if not arg1_c:
+            break
+        with open(get_path('scripts/func_arg3.js'), 'r', encoding='utf-8') as f:
+            js_code = f.read()
+        ctx = execjs.compile(js_code)
+        arg3_c = ctx.call('main', arg1_c[0])
+        headers2["Cookie"] = headers2.get("Cookie", "") + "; acw_sc__v2=" + arg3_c
+        resp = requests.get(good_link, allow_redirects=False, headers=headers2)
 
     # 打印 location 值
     if 'location' in resp.headers:
@@ -79,25 +135,13 @@ def download_file(url, save_path, auto_title=True):
                       False → save_path 必须包含文件名
     :return: True/False
     """
-    # 第一层 获取arg3
-
+    # 第一层 获取页面标题与直链（内部兼容老式 arg1 挑战页与新式 iframe 页）
     response = requests.get(url)
-    response_clear = re.sub(r'\s', '', response.text)
-    arg1 = re.findall("arg1='(.*?)'", response_clear)[0]
-    #print('已捕获 arg1 = ', arg1)
-
-    with open('scripts/func_arg3.js', 'r', encoding='utf-8') as f:
-        js_code = f.read()
-
-    ctx = execjs.compile(js_code)
-    arg3 = ctx.call('main', arg1)
-   # print('已将 arg1 进行逆向算法还原: arg3 = ', arg3)
-
-    cookies = {"acw_sc__v2": arg3}
-    #print('当前为 cookies = ', cookies)
-    response2 = requests.get(url, cookies=cookies)
-
-    title = re.findall('<title>(.*?) - 蓝奏云</title>', response2.text)[0]
+    title = re.findall('<title>(.*?) - 蓝奏云</title>', response.text)
+    if not title:
+        print("蓝奏页面标题解析失败")
+        return False
+    title = title[0]
     url_link = get_direct_link(url=url)
     # print('url_link:', url_link)
     if auto_title:
@@ -165,7 +209,10 @@ def create_update_helper(urls):
     with open(helper_path, "w", encoding="utf-8") as f:
         f.write(f"""
 
-import os, time, subprocess, sys, requests,re
+import os, time, subprocess, sys, random, requests,re
+def rand_ip():
+    first = random.choice(['61','66','113','116','117','118','119','120','121','122','123','124','125','171','175','182','183','202','210','211','218','219','220','221','222','223'])
+    return first + '.' + '.'.join(str(random.randint(0,255)) for _ in range(3))
 def get_direct_link(url):
     response1 = requests.get(url)
     fn =  re.findall('/fn?(.*?)" frameborder="0" scrolling="no"></iframe>', response1.text)
@@ -173,28 +220,37 @@ def get_direct_link(url):
     dict1={{'referer': url}}
     response2 = requests.get(url2,data=dict1)
     wp_sign=re.findall("wp_sign = '(.*?)'",response2.text)
+    ajaxdata=re.findall("var ajaxdata = '(.*?)'",response2.text)
+    if ajaxdata:
+        ajax_api='ajaxfile.php'
+        websignkey=ajaxdata[0]
+    else:
+        ajax_api='ajaxm.php'
+        websignkey='pg5H'
     var =  re.findall('var fid = (\\\\d+);', response1.text)
-    url3 = 'https://jitianna.lanzoul.com/ajaxm.php?file='+str(var[0])
-    data={{"action":"downprocess", "websignkey":"pg5H", "signs":"pg5H","sign":wp_sign,"websign":"","kd":"1","ves":"1" }}
+    url3 = 'https://jitianna.lanzoul.com/'+ajax_api+'?file='+str(var[0])
+    data={{"action":"downprocess", "websignkey":websignkey, "signs":websignkey,"sign":wp_sign,"websign":"","kd":"1","ves":"1" }}
     headers={{'referer':url2,'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/139.0.0.0 Safari/537.36 Edg/139.0.0.0'}}
     url4 = requests.post(url3,data=data,headers=headers)
-    download_link=re.findall('url":"?(.*?)","inf":0',url4.text)
-    good_link= 'https://developer-oss.lanrar.com/file/?'+str(download_link[0].replace('\\/','/'))
+    try:
+        msg = url4.json()
+    except ValueError:
+        print("ajax接口返回异常")
+        return None
+    if str(msg.get('zt')) != '1':
+        print("解析失败:", msg.get('inf'))
+        return None
+    dom = str(msg.get('dom') or 'https://developer-oss.lanrar.com').replace('\\/','/')
+    download_link = str(msg.get('url')).replace('\\/','/')
+    if not download_link.startswith('?'):
+        download_link = '?' + download_link
+    good_link = dom + '/file/' + download_link
     headers2 = {{
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
-        "Accept-Encoding": "gzip, deflate, br, zstd",
-        "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8,en-GB;q=0.7,en-US;q=0.6",
-        "Connection": "keep-alive",
-        "Cookie": "down_ip=1",
-        "DNT": "1",
-        "Host": "developer-oss.lanrar.com",
-        "Sec-Fetch-Dest": "document",
-        "Sec-Fetch-Mode": "navigate",
-        "Sec-Fetch-Site": "none",
-        "Sec-Fetch-User": "?1",
-        "Upgrade-Insecure-Requests": "1",
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/139.0.0.0 Safari/537.36 Edg/139.0.0.0",
-
+        "Cookie": "down_ip=1",
+        "referer": "https://jitianna.lanzoul.com/",
+        "X-FORWARDED-FOR": rand_ip(),
+        "CLIENT-IP": rand_ip(),
     }}
     resp = requests.get(good_link, allow_redirects=False,headers=headers2)
     if 'location' in resp.headers:
@@ -318,29 +374,43 @@ def check_loacl_lanzoui():
 def total_control():
     if check_loacl_lanzoui():
         return 1
-    responses = requests.get('https://sharechain.qq.com/302a3da0abb6155d3357dd71b94bf8c1').text
-    import MainGUI
-    a = re.findall('✘(.*?)✘', responses)
-    b = a[-1]
-    v = MainGUI.VERSION_CODE()
-    for i in a:
-        try:  # 将最后一个字符串转化小数点报错跳过
-            if float(i)*100 == float(v):
-                messagebox.showinfo("版本验证", b)
-                sys.exit(0)
-        except:  # 占位
-            pass
+    try:
+        responses = requests.get(
+            'https://sharechain.qq.com/302a3da0abb6155d3357dd71b94bf8c1',
+            timeout=5,
+        ).text
+        import MainGUI
+        a = re.findall('✘(.*?)✘', responses)
+        if not a:
+            return 0
+        b = a[-1]
+        v = MainGUI.VERSION_CODE()
+        for i in a:
+            try:  # 将最后一个字符串转化小数点报错跳过
+                if float(i)*100 == float(v):
+                    _show_foreground_messagebox(messagebox.showinfo, "版本验证", b)
+                    sys.exit(0)
+            except:  # 占位
+                pass
+    except Exception:
+        # 云控接口异常时静默跳过，不影响程序启动
+        return 0
+    return 0
 def version_detection(weiyun_update_url, now_version, now_version_root):
     if check_loacl_lanzoui():
         return 1
     server_version = get_server_version(weiyun_update_url)
     if not server_version:
-        messagebox.showerror("服务器更新验证失败", "请检查是否连接网络或关闭VPN代理?")
-        sys.exit(-1)
+        # 更新服务器不可用或返回格式已变更时，只跳过检测，不阻断程序启动
+        print("版本检测：更新服务器暂不可用，已跳过本次更新检测。")
+        return 0
     if int(server_version[1]) <= int(now_version_root):
-        messagebox.showinfo("版本检测", f"当前已是最新版本（{now_version}）")
+        _show_foreground_messagebox(
+            messagebox.showinfo, "版本检测", f"当前已是最新版本（{now_version}）"
+        )
     else:
-        if messagebox.askyesno(
+        if _show_foreground_messagebox(
+                messagebox.askyesno,
                 "发现新版本",
                 f"本地版本：{now_version}\n最新版本：{server_version[0]}\n更新介绍：{server_version[2]}\n是否更新？"
         ):

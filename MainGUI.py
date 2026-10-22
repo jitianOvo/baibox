@@ -6,11 +6,12 @@ from PySide6.QtGui import (QFont,QFontDatabase,QPixmap,QIcon,QColor,QTextCursor,
 from PySide6.QtWidgets import (QApplication,QWidget,QDialog,QFrame,QLabel,QPushButton,QLineEdit,QTextEdit,QListWidget,
 QListWidgetItem,QFileDialog,QMessageBox,QVBoxLayout,QHBoxLayout,QProgressBar,QScrollArea,QStackedWidget,QSizePolicy,)
 
-VERSION = "v2.2"
+VERSION = "V3.0"
 
 def VERSION_CODE():
-    version = int(float(VERSION.split('v')[1]) * 100)
-    return version
+    # 统一版本号只改 VERSION 一处，兼容 v3.0 / V3.0 两种写法
+    number = VERSION.lstrip('vV')
+    return int(float(number) * 100)
 
 def build_ui_font(point_size=10, weight=QFont.Normal):
     font = QFont("Microsoft YaHei UI", point_size, weight)
@@ -258,7 +259,9 @@ class MainWindow(QWidget):
         pass
 
     def top_button_clicked(self, name):
-        if name == "控制台":
+        if name == "AI":
+            self.open_ai_assistant()
+        elif name == "控制台":
             if self.console_window.isVisible():
                 self.console_window.hide()
             else:
@@ -307,6 +310,7 @@ class MainWindow(QWidget):
         top_layout.addStretch()
 
         icon_paths = {
+            "AI": get_path("assets/logos/iconic_round.png"),
             "控制台": get_path("assets/logos/ui_search.png"),
             "最小化": get_path("assets/logos/ui_min.ico"),
             "关闭": get_path("assets/logos/ui_close.ico"),
@@ -377,7 +381,10 @@ class MainWindow(QWidget):
         self.stacked_widget.addWidget(self.build_tool_page("ADB功能", [
             (" Scrcpy投屏", "#FF0000", get_path("assets/logos/scrcpy.ico"), self.open_scrcpy),
             (" 设备选择", "#FF0000", get_path("assets/logos/android2.png"), self.on_choose_devices_clicked),
+            (" 连接无线设备", "#FF0000", get_path("assets/logos/android2.png"), self.adb_wireless_manager),
             (" 打开ADB面板", "#FF0000", get_path("assets/logos/cmd.png"), self.open_adb),
+            (" 手机轨迹录制", "#FF0000", get_path("assets/logos/android2.png"), self.open_phone_trace_recorder),
+            (" 手机视频无损压缩", "#FF0000", get_path("assets/logos/boss3.png"), self.open_phone_video_compress),
             ("一键备份基带", "#FF0000", get_path("assets/logos/backup.png"), self.backup_IMG),
             ("一键还原基带", "#FF0000", get_path("assets/logos/restore.png"), self.restore_IMG),
             (" ADB重启设备", "#FF0000", get_path('assets/logos/reboot.png'), self.adb_reboot),
@@ -403,6 +410,9 @@ class MainWindow(QWidget):
             ("腾讯ACE一键根除", "#DE3163", get_path("assets/logos/Uninstall_ACE.png"), self.Uninstall_ACE),
             ("激活WIN10/WIN11正版", "#DE3163", get_path("assets/logos/win11.png"), self.windows_key),
             ("F1禁止跳Edge浏览器", "#DE3163", get_path("assets/logos/edge_fk.png"), self.prevent_F1),
+            ("Steam下载加速", "#DE3163", get_path("assets/logos/others/steam.png"), self.steam_accel),
+            ("Epic下载加速", "#DE3163", get_path("assets/logos/others/UU加速器.png"), self.epic_accel),
+            ("ToDo网络同步修复", "#DE3163", get_path("assets/logos/todo_logo.png"), self.todo_sync_fix),
             ("还原win10右键菜单", "#DE3163", get_path("assets/logos/win10_black.png"), self.win10_menu),
             ("还原win11右键菜单", "#DE3163", get_path("assets/logos/win11_black.png"), self.win11_menu),
             ("资源管理器精简六项隐藏", "#DE3163", get_path("assets/logos/explorer_hide"), self.six_class_hide),
@@ -441,11 +451,17 @@ class MainWindow(QWidget):
         ]))
 
         self.stacked_widget.addWidget(self.build_tool_page("其他", [
+            ("听读看 · 资源小站", "#2563EB", get_path("assets/media_hub/icons/hub.svg"), self.open_media_hub),
+            ("智能助手", "#FF00FF", get_path("assets/logos/iconic_round.png"), self.open_ai_assistant),
+            ("电脑手机数据备份", "#FF00FF", get_path("assets/logos/backup.png"), self.open_data_backup),
             ("软件中心", "#FF00FF", get_path("assets/logos/boss.png"), self.SoftWareStore),
             ("清理本软件缓存", "#FF00FF", get_path("assets/logos/boss2.png"), self.del_cache),
+            ("清理本软件核心组件", "#FF00FF", get_path("assets/logos/boss3.png"), self.clean_core_components),
             ("分券工具", "#FF00FF", get_path("assets/logos/boss3.png"), self.Open_FileMergeSplit),
             ('指定文件夹搜索文本',"#FF00FF", get_path("assets/logos/search.png"), self.open_file_searcher),
             ("Hash+MD5重复清理", "#FF00FF", get_path("assets/logos/garbage_truck_recycling.png"), self.open_hash_md5_tool),
+            ("电脑手机清理残留", "#FF00FF", get_path("assets/logos/delete.png"), self.open_clean_residue),
+            ("大丸视频压缩", "#FF00FF", get_path("assets/logos/dwgjx_icon.png"), self.open_dwgjx),
             ("安装李跳跳并发送配置文件", "#FF00FF", get_path("assets/logos/Leetiaotiao.png"), self.Leetiaotiao),
         ]))
 
@@ -594,10 +610,18 @@ import libs.DeepSearch as ds
 import libs.SoftWareStore as store
 import libs.Cloud_Installation_Service as cloud
 import libs.HashMD5Tool as hashmd5
+import libs.CleanResidue as clean_residue
+import libs.DwgjxLauncher as dwgjx
+import libs.PhoneTraceLauncher as trace
+import libs.AiAssistant as ai
+import libs.PhoneVideoCompress as pvc
+import libs.DataBackup as dbk
+import libs.MediaHub as media_hub
 import core_function as core
 # ================== 统一绑定表 ==================
 
 BINDINGS = {
+    media_hub: ['open_media_hub'],
     core: [
         'prevent_F1',
         'win10_menu',
@@ -605,8 +629,12 @@ BINDINGS = {
         'six_class_hide',
         'six_class_hide_cancel',
         'explorer_clean',
+        'steam_accel',
+        'epic_accel',
+        'todo_sync_fix',
         'win11_settings',
         'del_cache',
+        'clean_core_components',
         'oneplus_unblock_BL',
         'install_adb_driver',
         'driver360',
@@ -641,6 +669,7 @@ BINDINGS = {
         'install_environment_apks',
         'adb_reboot',
         'on_choose_devices_clicked',
+        'adb_wireless_manager',
         'Leetiaotiao'
     ],
     show_img: [
@@ -657,6 +686,24 @@ BINDINGS = {
     ],
     hashmd5: [
         'open_hash_md5_tool',
+    ],
+    clean_residue: [
+        'open_clean_residue',
+    ],
+    trace: [
+        'open_phone_trace_recorder',
+    ],
+    pvc: [
+        'open_phone_video_compress',
+    ],
+    ai: [
+        'open_ai_assistant',
+    ],
+    dbk: [
+        'open_data_backup',
+    ],
+    dwgjx: [
+        'open_dwgjx',
     ],
     store: [
         'SoftWareStore',

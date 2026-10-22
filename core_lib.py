@@ -3,7 +3,7 @@ import os
 import sys
 import math
 
-def ctypes_appid(IDname='®JT.jitian.v2.0'):
+def ctypes_appid(IDname='®JT.jitian.v3.0'):
     """为tk、PySide6提供任务栏图标正常显示"""
     ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(IDname)
 

@@ -1,0 +1,40 @@
+# Python and test output
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+/work/media-hub-tests/
+
+# Local editor state and environments
+.idea/
+.vscode/
+.venv/
+venv/
+.env
+.env.*
+!.env.example
+
+# Private settings, user records and local archives
+/.archive/
+/data/local/
+/data/cache/
+/data/media_hub/
+/libs/phone_trace_recorder/config/
+/libs/phone_trace_recorder/recordings/
+/libs/phone_trace_recorder/exports/
+/libs/phone_trace_recorder/temp/
+
+# Generated logs and incomplete downloads
+*.log
+*.part
+*.part.json
+*.download.log
+Thumbs.db
+Desktop.ini
+
+# Local tool preferences (the programs themselves remain versioned)
+/tools/bin/Quick_Any2Ico.ini
+/tools/bin/Wiztree_4_28/WizTree3.ini

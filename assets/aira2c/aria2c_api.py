@@ -1,52 +1,117 @@
 import os
+import re
 import subprocess
-def aria2_download(url, threads=16, headers=None, cookie=None, filename=None, path=".", min_split_size="1M"):
-    """
-    aria2 极速多线程下载（plus版）
-    参数:
-    url           下载链接
-    threads       线程数，建议16，并非越大越快（受限于磁盘/服务器）
-    headers       dict 形式 header
-    cookie        dict 或 str
-    filename      保存文件名 (None = 服务器名)
-    path          保存目录
-    min_split_size 分段最小单位（如 '1M'），建议不低于1M
-    """
+
+# aria2 进度行形如：
+#   [#4b4905 0B/0B CN:1 DL:0B]
+#   [#4b4905 12.3MiB/45.6MiB(27%) CN:4 DL:2.1MiB ETA:14s]
+_PROGRESS_RE = re.compile(
+    r"\[#[0-9a-f]+\s+([\d.]+[KMGTP]?i?B)/([\d.]+[KMGTP]?i?B)"
+    r"(?:\((\d+)%\))?\s+CN:\d+\s+DL:([\d.]+[KMGTP]?i?B)"
+    r"(?:\s+ETA:(\S+))?\]"
+)
+
+
+def _parse_progress(line):
+    """解析 aria2 一行进度输出；不是进度行时返回 None"""
+    m = _PROGRESS_RE.search(line)
+    if not m:
+        return None
+    done_str, total_str = m.group(1), m.group(2)
+    percent = m.group(3)
+    speed_str = m.group(4) or "0B"
+    eta_str = m.group(5) or ""
+
+    # 用括号内的百分比优先，否则按已下载/总量估算
+    pct = None
+    if percent:
+        try:
+            pct = int(percent)
+        except ValueError:
+            pct = None
+    if pct is None:
+        try:
+            done = float(done_str.rstrip("iB"))
+            total = float(total_str.rstrip("iB"))
+            if total > 0:
+                pct = min(100, int(done / total * 100))
+        except ValueError:
+            pct = 0
+    return {
+        "percent": max(0, min(100, pct or 0)),
+        "downloaded": done_str,
+        "total": total_str,
+        "speed": speed_str,
+        "eta": eta_str,
+    }
+
+
+def _build_command(url, threads, headers, cookie, filename, path, min_split_size):
     base_dir = os.path.dirname(os.path.abspath(__file__))
-    exe_path = os.path.join(base_dir, "aria2c.exe")  # 选中当前目录下的 aria2c.exe
+    exe_path = os.path.join(base_dir, "aria2c.exe")
 
     cmd = [
         exe_path,
         url,
-        "-x", str(threads),  # 单服务器最大连接数
-        "-s", str(threads),  # 分段数
-        "-k", min_split_size,  # 每段大小
-        "-d", path,  # 保存目录
-        "--continue=true",  # 断点续传
+        "-x", str(threads),
+        "-s", str(threads),
+        "-k", min_split_size,
+        "-d", path,
+        "--continue=true",
         "--summary-interval=1",
         "--max-connection-per-server=" + str(threads),
         "--split=" + str(threads),
-        "--min-split-size=" + min_split_size,  # 确保分段不会过小（建议1M以上）
-        "--retry-wait=2",  # 重试等待时间
-        "--max-tries=15",  # 最大重试次数
-        "--timeout=60",  # 超时时间
-        "--check-certificate=false",  # 某些直链可禁用证书检测
+        "--min-split-size=" + min_split_size,
+        "--retry-wait=2",
+        "--max-tries=15",
+        "--timeout=60",
+        "--check-certificate=false",
     ]
     if filename:
         cmd += ["-o", filename]
 
-    headers = headers.copy() if headers else {}
+    headers = dict(headers) if headers else {}
     if cookie:
         if isinstance(cookie, dict):
             cookie_str = "; ".join(f"{k}={v}" for k, v in cookie.items())
         else:
             cookie_str = cookie
         headers["Cookie"] = cookie_str
-
     for k, v in headers.items():
         cmd += ["--header", f"{k}: {v}"]
+    return cmd
 
-    # print("执行命令:")
-    # print(" ".join(cmd))
 
-    subprocess.run(cmd)
+def aria2_download(url, threads=16, headers=None, cookie=None, filename=None, path=".", min_split_size="1M", on_progress=None):
+    """
+    极速多线程下载（内置显示版）。
+    参数与原版一致，新增:
+    on_progress  回调 dict，形如 {"percent":..,"downloaded":..,"total":..,"speed":..,"eta":..}
+    不再弹出黑色 CMD 窗口。
+    """
+    cmd = _build_command(url, threads, headers, cookie, filename, path, min_split_size)
+
+    proc = subprocess.Popen(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        creationflags=subprocess.CREATE_NO_WINDOW,
+    )
+
+    tail_lines = []
+    for line in proc.stdout:
+        tail_lines.append(line.strip())
+        if len(tail_lines) > 30:
+            tail_lines.pop(0)
+        info = _parse_progress(line)
+        if info and on_progress:
+            on_progress(info)
+    return_code = proc.wait()
+    if return_code != 0:
+        raise RuntimeError(
+            "aria2 下载失败（退出码 %s）：%s" % (return_code, " | ".join(tail_lines[-6:]))
+        )
+    return return_code

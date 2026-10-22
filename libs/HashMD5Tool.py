@@ -1,8 +1,10 @@
 import hashlib
 import json
 import os
+import stat
 import subprocess
 import sys
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 
@@ -76,6 +78,75 @@ def load_scan_result(filename=CACHE_FILE):
         return data.get("duplicates", {}), data.get("ui_state", {})
     except Exception:
         return {}, {}
+
+
+def _is_wal_shm_file(file_path):
+    """判断是否为 SQLite 运行期间产生的 -wal / -shm 文件"""
+    lower = file_path.lower()
+    return lower.endswith(".db-wal") or lower.endswith(".db-shm")
+
+
+def delete_file_with_retry(file_path, max_retries=3, wait_seconds=0.5):
+    """
+    删除文件，处理 WinError 32（文件被占用）等常见失败。
+    返回 (是否成功, 结果说明文本)
+    """
+    if not os.path.exists(file_path):
+        return True, f"文件不存在（已跳过）: {file_path}"
+
+    # 先去掉只读属性
+    try:
+        os.chmod(file_path, stat.S_IWRITE)
+    except OSError as e:
+        print("设置可写属性失败:", e)
+
+    for attempt in range(1, max_retries + 1):
+        try:
+            os.remove(file_path)
+            if os.path.exists(file_path):
+                raise OSError("文件删除后仍然存在")
+            return True, f"删除成功: {file_path}"
+        except FileNotFoundError:
+            return True, f"文件不存在（已跳过）: {file_path}"
+        except PermissionError as e:
+            winerror = getattr(e, "winerror", None)
+            if winerror in (32, 33):
+                # WinError 32 文件被占用；先尝试结束常见占用进程
+                name = os.path.basename(file_path).lower()
+                if _is_wal_shm_file(file_path) or "wechat" in name or "weixin" in name:
+                    _kill_wechat_processes()
+                if attempt < max_retries:
+                    time.sleep(wait_seconds)
+                    continue
+                return False, f"删除失败，文件被其他程序占用 (WinError {winerror}): {file_path}"
+            if winerror == 5:
+                return False, f"删除失败，权限不足 (WinError 5): {file_path}"
+            return False, f"删除失败 (WinError {winerror}): {e}"
+        except OSError as e:
+            winerror = getattr(e, "winerror", None)
+            print("删除异常:", e)
+            if winerror in (32, 33) and attempt < max_retries:
+                if _is_wal_shm_file(file_path):
+                    _kill_wechat_processes()
+                time.sleep(wait_seconds)
+                continue
+            return False, f"删除失败，其他错误: {e}"
+
+    return False, f"达到最大重试次数仍失败: {file_path}"
+
+
+def _kill_wechat_processes():
+    """尝试结束微信相关进程，释放 .db-wal / .db-shm 文件句柄"""
+    for proc in ("WeChat.exe", "Weixin.exe", "wechat.exe", "WeChatAppEx.exe"):
+        try:
+            subprocess.run(
+                ["taskkill", "/f", "/im", proc],
+                shell=True,
+                capture_output=True,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000),
+            )
+        except Exception:
+            pass
 
 
 class ScanThread(QThread):
@@ -190,7 +261,7 @@ class HashMD5ToolDialog(QDialog):
         self.setStyleSheet(
             """
             QDialog#hashDialog {
-                background-color: #f4f7fc;
+                background-color: #eef2f8;
                 color: #1f2937;
             }
             QFrame#card {
@@ -199,13 +270,30 @@ class HashMD5ToolDialog(QDialog):
                 border-radius: 12px;
             }
             QLabel#titleLabel {
-                font-size: 16px;
+                font-size: 17px;
                 font-weight: 700;
                 color: #0f172a;
             }
             QLabel#subTitleLabel {
                 font-size: 12px;
                 color: #64748b;
+            }
+            QLabel#sectionLabel {
+                font-size: 12px;
+                font-weight: 600;
+                color: #475569;
+            }
+            QLabel#statValue {
+                font-size: 13px;
+                font-weight: 700;
+                color: #2563eb;
+            }
+            QLabel#statusLabel {
+                font-size: 12px;
+                color: #475569;
+                background-color: #f1f5f9;
+                border-radius: 8px;
+                padding: 6px 10px;
             }
             QLabel {
                 color: #334155;
@@ -228,7 +316,8 @@ class HashMD5ToolDialog(QDialog):
                 border-radius: 8px;
                 color: #1f2937;
                 padding: 7px 12px;
-                min-height: 34px;
+                min-height: 32px;
+                font-size: 12px;
             }
             QPushButton:hover {
                 background-color: #e6edf9;
@@ -270,7 +359,7 @@ class HashMD5ToolDialog(QDialog):
                 alternate-background-color: #f6f9ff;
             }
             QListWidget::item {
-                padding: 6px 8px;
+                padding: 5px 8px;
                 border-bottom: 1px solid #edf2fb;
             }
             QListWidget::item:selected, QTreeWidget::item:selected {
@@ -278,7 +367,7 @@ class HashMD5ToolDialog(QDialog):
                 color: #0f172a;
             }
             QTreeWidget::item {
-                padding: 4px 6px;
+                padding: 3px 5px;
             }
             QTreeWidget::item:hover {
                 background-color: #f2f7ff;
@@ -298,6 +387,7 @@ class HashMD5ToolDialog(QDialog):
                 text-align: center;
                 color: #334155;
                 min-height: 20px;
+                font-size: 11px;
             }
             QProgressBar::chunk {
                 border-radius: 7px;
@@ -352,85 +442,154 @@ class HashMD5ToolDialog(QDialog):
         layout.setContentsMargins(14, 14, 14, 14)
         layout.setSpacing(10)
 
+        # ===== 顶部标题卡 =====
         header_card = QFrame()
         header_card.setObjectName("card")
-        header_layout = QVBoxLayout(header_card)
-        header_layout.setContentsMargins(14, 10, 14, 12)
-        header_layout.setSpacing(8)
+        header_layout = QHBoxLayout(header_card)
+        header_layout.setContentsMargins(14, 12, 14, 12)
+        header_layout.setSpacing(10)
 
+        title_box = QVBoxLayout()
+        title_box.setSpacing(2)
         title_label = QLabel("Hash + MD5 重复文件清理")
         title_label.setObjectName("titleLabel")
-        sub_title_label = QLabel("双重校验更准确，默认保留每组首个文件")
+        sub_title_label = QLabel("纯自研高速搜索引擎 · 智能过滤 · 由 jitian 独立算法开发")
         sub_title_label.setObjectName("subTitleLabel")
-        header_layout.addWidget(title_label)
-        header_layout.addWidget(sub_title_label)
+        title_box.addWidget(title_label)
+        title_box.addWidget(sub_title_label)
+        header_layout.addLayout(title_box)
+        header_layout.addStretch()
 
-        path_layout = QHBoxLayout()
+        self.stat_label = QLabel("0 个重复组")
+        self.stat_label.setObjectName("statValue")
+        header_layout.addWidget(self.stat_label)
+        layout.addWidget(header_card)
+
+        # ===== 扫描路径卡 =====
+        path_card = QFrame()
+        path_card.setObjectName("card")
+        path_layout = QVBoxLayout(path_card)
+        path_layout.setContentsMargins(12, 10, 12, 12)
         path_layout.setSpacing(8)
+
+        path_row = QHBoxLayout()
+        path_row.setSpacing(8)
+        path_caption = QLabel("扫描路径")
+        path_caption.setObjectName("sectionLabel")
+        path_row.addWidget(path_caption)
+        path_row.addStretch()
         self.add_path_btn = QPushButton("添加扫描路径")
         self.add_path_btn.setProperty("role", "primary")
         self.add_path_btn.clicked.connect(self.add_path)
-        path_layout.addWidget(self.add_path_btn)
+        path_row.addWidget(self.add_path_btn)
+        path_layout.addLayout(path_row)
 
         self.path_list = QListWidget()
         self.path_list.setAlternatingRowColors(True)
-        self.path_list.setMinimumHeight(92)
-        self.path_list.setMaximumHeight(120)
+        self.path_list.setMinimumHeight(70)
+        self.path_list.setMaximumHeight(104)
         path_layout.addWidget(self.path_list)
-        header_layout.addLayout(path_layout)
-        layout.addWidget(header_card)
+        layout.addWidget(path_card)
 
-        scan_layout = QHBoxLayout()
+        # ===== 扫描控制卡 =====
+        scan_card = QFrame()
+        scan_card.setObjectName("card")
+        scan_layout = QVBoxLayout(scan_card)
+        scan_layout.setContentsMargins(12, 10, 12, 12)
         scan_layout.setSpacing(8)
+
+        scan_row = QHBoxLayout()
+        scan_row.setSpacing(8)
         self.scan_btn = QPushButton("开始扫描")
         self.scan_btn.setProperty("role", "primary")
         self.scan_btn.clicked.connect(self.start_scan)
-        scan_layout.addWidget(self.scan_btn)
+        scan_row.addWidget(self.scan_btn)
 
         self.stop_btn = QPushButton("停止扫描")
         self.stop_btn.setEnabled(False)
         self.stop_btn.clicked.connect(self.stop_scan)
-        scan_layout.addWidget(self.stop_btn)
-        layout.addLayout(scan_layout)
+        scan_row.addWidget(self.stop_btn)
 
         self.progress_bar = QProgressBar()
-        layout.addWidget(self.progress_bar)
-        self.status_label = QLabel("状态: 等待扫描")
-        layout.addWidget(self.status_label)
+        self.progress_bar.setRange(0, 100)
+        self.progress_bar.setValue(0)
+        scan_row.addWidget(self.progress_bar, 1)
+        scan_layout.addLayout(scan_row)
 
-        filter_layout = QHBoxLayout()
+        self.status_label = QLabel("状态：等待扫描")
+        self.status_label.setObjectName("statusLabel")
+        scan_layout.addWidget(self.status_label)
+        layout.addWidget(scan_card)
+
+        # ===== 过滤与搜索 =====
+        filter_card = QFrame()
+        filter_card.setObjectName("card")
+        filter_layout = QHBoxLayout(filter_card)
+        filter_layout.setContentsMargins(12, 10, 12, 10)
+        filter_layout.setSpacing(8)
+
+        exclude_label = QLabel("排除扩展名")
+        exclude_label.setObjectName("sectionLabel")
+        filter_layout.addWidget(exclude_label)
         self.exclude_input = QLineEdit()
-        self.exclude_input.setPlaceholderText("排除扩展名, 用逗号分隔: .cpp,.dll")
+        self.exclude_input.setPlaceholderText(".cpp,.dll，逗号分隔")
+        self.exclude_input.setMinimumWidth(180)
+        filter_layout.addWidget(self.exclude_input, 1)
+
         self.exclude_btn = QPushButton("刷新过滤")
         self.exclude_btn.clicked.connect(self.refresh_filter)
-        filter_layout.addWidget(self.exclude_input)
         filter_layout.addWidget(self.exclude_btn)
 
+        search_label = QLabel("搜索文件")
+        search_label.setObjectName("sectionLabel")
+        filter_layout.addWidget(search_label)
         self.search_input = QLineEdit()
-        self.search_input.setPlaceholderText("搜索文件/路径")
+        self.search_input.setPlaceholderText("输入关键词过滤结果")
+        self.search_input.setMinimumWidth(160)
         self.search_input.textChanged.connect(self.search_results)
-        filter_layout.addWidget(self.search_input)
-        layout.addLayout(filter_layout)
+        filter_layout.addWidget(self.search_input, 1)
+        layout.addWidget(filter_card)
 
+        # ===== 结果卡 =====
         result_card = QFrame()
         result_card.setObjectName("card")
         result_layout = QVBoxLayout(result_card)
         result_layout.setContentsMargins(10, 10, 10, 10)
         result_layout.setSpacing(8)
 
+        result_row = QHBoxLayout()
+        result_caption = QLabel("扫描结果")
+        result_caption.setObjectName("sectionLabel")
+        result_row.addWidget(result_caption)
+        result_row.addStretch()
+        self.expand_btn = QPushButton("全部展开")
+        self.expand_btn.clicked.connect(lambda: self.tree.expandAll())
+        result_row.addWidget(self.expand_btn)
+        self.collapse_btn = QPushButton("全部折叠")
+        self.collapse_btn.clicked.connect(lambda: self.tree.collapseAll())
+        result_row.addWidget(self.collapse_btn)
+        result_layout.addLayout(result_row)
+
         self.tree = QTreeWidget(result_card)
         self.tree.setColumnCount(3)
         self.tree.setHeaderLabels(["路径", "大小", "修改时间"])
         self.tree.setAlternatingRowColors(True)
         self.tree.setMinimumHeight(180)
+        self.tree.setColumnWidth(0, 520)
+        self.tree.setColumnWidth(1, 90)
+        self.tree.setColumnWidth(2, 150)
         result_layout.addWidget(self.tree, 1)
         layout.addWidget(result_card, 1)
 
+        # ===== 底部操作栏 =====
         action_bar = QFrame()
         action_bar.setObjectName("card")
         action_layout = QHBoxLayout(action_bar)
-        action_layout.setContentsMargins(10, 8, 10, 8)
+        action_layout.setContentsMargins(12, 8, 12, 8)
         action_layout.setSpacing(8)
+        self.delete_hint_label = QLabel("勾选状态决定保留与删除")
+        self.delete_hint_label.setObjectName("sectionLabel")
+        action_layout.addWidget(self.delete_hint_label)
         action_layout.addStretch()
         self.delete_btn = QPushButton("删除未勾选文件")
         self.delete_btn.setProperty("role", "danger")
@@ -447,6 +606,8 @@ class HashMD5ToolDialog(QDialog):
         duplicates, ui_state = load_scan_result()
         self.duplicates = duplicates
         self.display_duplicates()
+        if hasattr(self, "stat_label"):
+            self.stat_label.setText(f"{len(duplicates)} 个重复组")
 
         window_size = ui_state.get("window_size", [1000, 700])
         if len(window_size) == 2:
@@ -504,7 +665,7 @@ class HashMD5ToolDialog(QDialog):
 
         self.tree.clear()
         self.progress_bar.setValue(0)
-        self.status_label.setText("状态: 扫描中...")
+        self.status_label.setText("状态：扫描中...")
         self.scan_btn.setEnabled(False)
         self.stop_btn.setEnabled(True)
 
@@ -519,21 +680,23 @@ class HashMD5ToolDialog(QDialog):
     def stop_scan(self):
         if self.thread and self.thread.isRunning():
             self.thread.stop()
-            self.status_label.setText("状态: 正在停止扫描...")
+            self.status_label.setText("状态：正在停止扫描...")
             self.stop_btn.setEnabled(False)
 
     def update_progress(self, processed, total, file_path):
         total = max(total, 1)
         self.progress_bar.setMaximum(total)
         self.progress_bar.setValue(min(processed, total))
-        self.status_label.setText(f"状态: {processed}/{total} - {file_path}")
+        pct = int(min(processed, total) / max(total, 1) * 100)
+        self.progress_bar.setFormat(f"扫描中 {pct}%  (%v / %m)")
+        self.status_label.setText(f"状态：{processed}/{total} - {file_path}")
 
     def scan_finished(self, duplicates):
         self.duplicates = duplicates
         self.display_duplicates()
         self.scan_btn.setEnabled(True)
         self.stop_btn.setEnabled(False)
-        self.status_label.setText(f"扫描完成，重复组: {len(duplicates)}")
+        self.status_label.setText(f"扫描完成，找到 {len(duplicates)} 组重复文件")
 
     def display_duplicates(self):
         self.tree.clear()
@@ -541,6 +704,14 @@ class HashMD5ToolDialog(QDialog):
 
         for md5_value, files in self.duplicates.items():
             group_item = QTreeWidgetItem(self.tree, [f"重复组: {md5_value}", "", ""])
+            # 找到文件名最短的下标
+            min_idx = 0
+            min_len = float('inf')
+            for idx, file_path in enumerate(files):
+                name_len = len(os.path.basename(file_path))
+                if name_len < min_len:
+                    min_len = name_len
+                    min_idx = idx
             for i, file_path in enumerate(files):
                 try:
                     size = os.path.getsize(file_path)
@@ -548,12 +719,15 @@ class HashMD5ToolDialog(QDialog):
                 except Exception:
                     size, mtime = 0, ""
                 child = QTreeWidgetItem(group_item, [file_path, format_size(size), mtime])
-                child.setCheckState(0, Qt.Checked if i == 0 else Qt.Unchecked)
+                # 只勾选文件名最短的，其他全部不勾选
+                child.setCheckState(0, Qt.Checked if i == min_idx else Qt.Unchecked)
                 total_files += 1
             group_item.setExpanded(True)
 
         self.search_results()
-        self.status_label.setText(f"状态: {len(self.duplicates)} 个重复组, {total_files} 个文件")
+        self.status_label.setText(f"状态：{len(self.duplicates)} 个重复组，共 {total_files} 个文件")
+        if hasattr(self, "stat_label"):
+            self.stat_label.setText(f"{len(self.duplicates)} 个重复组")
 
     def search_results(self):
         keyword = self.search_input.text().lower().strip()
@@ -605,17 +779,33 @@ class HashMD5ToolDialog(QDialog):
             QMessageBox.information(self, "提示", "没有选择要删除的文件")
             return
 
-        confirm = QMessageBox.question(self, "确认删除", f"确认删除 {len(to_delete)} 个文件吗？")
-        if confirm != QMessageBox.Yes:
+        box = QMessageBox(self)
+        box.setWindowTitle("确认删除")
+        box.setIcon(QMessageBox.Warning)
+        box.setText(f"确认删除 {len(to_delete)} 个文件吗？\n\n删除后不可恢复，请谨慎操作。")
+        btn_ok = box.addButton("确认删除", QMessageBox.AcceptRole)
+        btn_cancel = box.addButton("取消", QMessageBox.RejectRole)
+        box.setDefaultButton(btn_cancel)
+        box.exec()
+        if box.clickedButton() != btn_ok:
             return
 
+        failed = []
+        deleted_count = 0
         for group, child in to_delete:
             file_path = child.text(0)
-            try:
-                os.remove(file_path)
-            except Exception as e:
-                print(f"删除失败: {file_path}, {e}")
-            group.removeChild(child)
+            ok, msg = delete_file_with_retry(file_path)
+            if ok:
+                deleted_count += 1
+                group.removeChild(child)
+            else:
+                print(msg)
+                failed.append(msg)
+
+        if failed:
+            QMessageBox.warning(self, "删除失败", f"以下文件未能删除:\n" + "\n\n".join(failed))
+        elif deleted_count:
+            QMessageBox.information(self, "删除完成", f"成功删除 {deleted_count} 个文件。")
 
         for i in reversed(range(root.childCount())):
             group = root.child(i)
@@ -645,10 +835,11 @@ class HashMD5ToolDialog(QDialog):
 
         def delete_file_func():
             file_path = item.text(0)
-            try:
-                os.remove(file_path)
-            except Exception as e:
-                print("删除失败", e)
+            ok, msg = delete_file_with_retry(file_path)
+            if not ok:
+                print(msg)
+                QMessageBox.warning(self, "删除失败", f"{msg}")
+                return
             parent = item.parent()
             parent.removeChild(item)
             if parent.childCount() == 0:

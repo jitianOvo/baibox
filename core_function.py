@@ -4,11 +4,14 @@ import subprocess
 import os,sys,winreg
 import random
 import time
-from PySide6.QtWidgets import (QMessageBox)
+from PySide6.QtWidgets import (QMessageBox, QDialog, QFrame, QHBoxLayout, QLabel, QPushButton, QVBoxLayout)
 from tkinter import messagebox
 from core_lib import get_path
 
 def windows_key(self):
+    if not _confirm_action(self, "操作确认", "将开始 Windows 10/11 正版激活。\n\n该操作会修改系统激活状态，是否继续？"):
+        print("已取消激活操作。")
+        return
     # 激活正版
     # subprocess.Popen(['cmd.exe', '/k', get_path("tools/一键激活win10和win11正版.bat")],creationflags=subprocess.CREATE_NEW_CONSOLE)
     print("正在开始 Windows 10-11 激活...")
@@ -30,35 +33,153 @@ def windows_key(self):
 
     input("按任意键继续...")
 
-def prevent_F1(self):
-    # subprocess.Popen(['cmd.exe', '/k', get_path("tools/F1禁止跳Edge浏览器.bat")],creationflags=subprocess.CREATE_NEW_CONSOLE)
-    helppane_path = r"C:\Windows\HelpPane.exe"
-    if os.path.exists(helppane_path):
-        print("Found HelpPane.exe, attempting to delete...")
+def _run_admin_cmd(args):
+    """运行系统命令并返回返回码，隐藏命令行窗口"""
+    try:
+        result = subprocess.run(
+            args,
+            shell=True,
+            capture_output=True,
+            text=True,
+            creationflags=subprocess.CREATE_NO_WINDOW,
+        )
+        return result.returncode
+    except Exception as e:
+        print("命令执行异常:", args, e)
+        return -1
 
-        # 取得所有权
-        subprocess.run(["takeown", "/f", helppane_path, "/a"], shell=True)
 
-        # 修改权限（拒绝当前用户访问）
-        username = os.getlogin()
-        subprocess.run(["icacls", helppane_path, "/deny", f"{username}:F"], shell=True)
+def _confirm_action(self, title, text):
+    """电脑脚本通用二次确认弹窗，确认返回 True"""
+    box = QMessageBox(self)
+    box.setWindowTitle(title)
+    box.setText(text)
+    box.setIcon(QMessageBox.Question)
+    btn_yes = box.addButton("确认执行", QMessageBox.AcceptRole)
+    btn_no = box.addButton("取消", QMessageBox.RejectRole)
+    box.setDefaultButton(btn_no)
+    box.exec()
+    return box.clickedButton() == btn_yes
 
-        # 强制删除
+
+def _disable_helppane(helppane_path, renamed_path):
+    """禁用 HelpPane.exe（F1 不再跳 Edge），返回是否成功"""
+    is_admin = bool(ctypes.windll.shell32.IsUserAnAdmin())
+    if is_admin:
+        subprocess.run(
+            ["taskkill", "/f", "/im", "HelpPane.exe"],
+            shell=True,
+            capture_output=True,
+            creationflags=subprocess.CREATE_NO_WINDOW,
+        )
+        _run_admin_cmd(["takeown", "/f", helppane_path, "/a"])
+        _run_admin_cmd(["icacls", helppane_path, "/grant", "*S-1-5-32-544:F"])
+        if not os.path.exists(renamed_path):
+            try:
+                os.rename(helppane_path, renamed_path)
+                if not os.path.exists(helppane_path):
+                    return True
+            except (PermissionError, OSError):
+                pass
         try:
             os.remove(helppane_path)
-        except PermissionError:
-            # 如果直接删不掉，尝试用 del 命令
-            subprocess.run(["del", "/f", "/q", helppane_path], shell=True)
+            if not os.path.exists(helppane_path):
+                return True
+        except (PermissionError, OSError):
+            pass
+        return False
 
-        # 检查是否删除成功
+    print("当前未以管理员运行，正在请求管理员权限...")
+    command = (
+        'taskkill /f /im HelpPane.exe >nul 2>&1 & '
+        f'takeown /f "{helppane_path}" /a >nul 2>&1 & '
+        f'icacls "{helppane_path}" /grant *S-1-5-32-544:F >nul 2>&1 & '
+        f'ren "{helppane_path}" HelpPane.exe.disabled'
+    )
+    result = ctypes.windll.shell32.ShellExecuteW(None, "runas", "cmd.exe", f"/c {command}", None, 0)
+    if result <= 32:
+        return False
+    for _ in range(30):
         if not os.path.exists(helppane_path):
-            print("HelpPane.exe has been deleted.")
+            return True
+        time.sleep(0.5)
+    return False
+
+
+def _restore_helppane(helppane_path, renamed_path):
+    """恢复 HelpPane.exe（F1 恢复系统帮助），返回是否成功"""
+    is_admin = bool(ctypes.windll.shell32.IsUserAnAdmin())
+    if is_admin:
+        _run_admin_cmd(["takeown", "/f", renamed_path, "/a"])
+        _run_admin_cmd(["icacls", renamed_path, "/grant", "*S-1-5-32-544:F"])
+        try:
+            os.rename(renamed_path, helppane_path)
+            return os.path.exists(helppane_path)
+        except (PermissionError, OSError):
+            return False
+
+    print("当前未以管理员运行，正在请求管理员权限...")
+    command = (
+        f'takeown /f "{renamed_path}" /a >nul 2>&1 & '
+        f'icacls "{renamed_path}" /grant *S-1-5-32-544:F >nul 2>&1 & '
+        f'ren "{renamed_path}" HelpPane.exe'
+    )
+    result = ctypes.windll.shell32.ShellExecuteW(None, "runas", "cmd.exe", f"/c {command}", None, 0)
+    if result <= 32:
+        return False
+    for _ in range(30):
+        if os.path.exists(helppane_path):
+            return True
+        time.sleep(0.5)
+    return False
+
+
+def prevent_F1(self):
+    # 双向脚本：HelpPane.exe 存在则禁用（F1 不跳 Edge），不存在则恢复（F1 回系统帮助）
+    helppane_path = r"C:\Windows\HelpPane.exe"
+    renamed_path = r"C:\Windows\HelpPane.exe.disabled"
+
+    is_enabled = os.path.exists(helppane_path)
+    is_disabled = (not is_enabled) and os.path.exists(renamed_path)
+
+    if not is_enabled and not is_disabled:
+        QMessageBox.information(self, "状态提示", "未检测到 HelpPane.exe，F1 保持系统默认帮助。")
+        return
+
+    if is_disabled:
+        # 当前已禁用 -> 恢复
+        if not _confirm_action(
+            self,
+            "恢复确认",
+            "当前状态：F1 已禁用。\n\n点击确认将恢复 HelpPane.exe，\nF1 键将恢复为系统默认帮助。\n\n是否继续？",
+        ):
+            print("已取消恢复操作。")
+            return
+        print("正在恢复 HelpPane.exe，F1 将回到系统帮助...")
+        if _restore_helppane(helppane_path, renamed_path):
+            QMessageBox.information(self, "操作完成", "恢复成功：HelpPane.exe 已还原，F1 恢复系统帮助。")
         else:
-            print("Failed to delete HelpPane.exe.")
+            QMessageBox.warning(self, "操作失败", "恢复失败：请以管理员身份运行，或检查文件是否被安全软件占用。")
+        return
+
+    # 当前已启用 -> 禁用
+    if not _confirm_action(
+        self,
+        "禁用确认",
+        "当前状态：F1 为系统默认（会跳 Edge 帮助页）。\n\n点击确认将禁用 HelpPane.exe，\n按下 F1 不再跳转 Edge。\n\n是否继续？",
+    ):
+        print("已取消禁用操作。")
+        return
+    print("正在禁用 HelpPane.exe，F1 将不再跳 Edge...")
+    if _disable_helppane(helppane_path, renamed_path):
+        QMessageBox.information(self, "操作完成", "禁用成功：HelpPane.exe 已禁用，F1 不再跳 Edge。")
     else:
-        print("HelpPane.exe not found.")
+        QMessageBox.warning(self, "操作失败", "禁用失败：请以管理员身份运行，或检查文件是否被安全软件占用。")
 
 def win10_menu(self):
+    if not _confirm_action(self, "操作确认", "将还原 Win10 完整右键菜单，并重启资源管理器。\n\n是否继续？"):
+        print("已取消操作。")
+        return
     subprocess.Popen(['cmd.exe', '/k', get_path("tools/修改win10菜单.bat")],
                      creationflags=subprocess.CREATE_NEW_CONSOLE)
     print("正在恢复 Win10 右键菜单...")
@@ -77,6 +198,9 @@ def win10_menu(self):
     print("Win10 右键菜单恢复完成！")
 
 def win11_menu(self):
+    if not _confirm_action(self, "操作确认", "将还原 Win11 精简右键菜单，并重启资源管理器。\n\n是否继续？"):
+        print("已取消操作。")
+        return
     # subprocess.Popen(['cmd.exe', '/k', get_path("tools/还原win11右键菜单.bat")],creationflags=subprocess.CREATE_NEW_CONSOLE)
     print("正在恢复 Win11 右键菜单...")
 
@@ -94,6 +218,9 @@ def win11_menu(self):
     print("Win11 右键菜单恢复完成！")
 
 def six_class_hide(self):
+    if not _confirm_action(self, "操作确认", "将隐藏资源管理器中的 6 个系统内置快捷项。\n\n此操作写入注册表并重启资源管理器，是否继续？"):
+        print("已取消操作。")
+        return
     # subprocess.Popen(['regedit.exe', '/s', get_path("tools/hide.reg")], creationflags=subprocess.CREATE_NEW_CONSOLE, shell=True)
     # 如果不是管理员，先提权
     if not ctypes.windll.shell32.IsUserAnAdmin():
@@ -127,6 +254,9 @@ def six_class_hide(self):
     QMessageBox.information(None, "提示", "隐藏成功！")
 
 def six_class_hide_cancel(self):
+    if not _confirm_action(self, "操作确认", "将恢复资源管理器中已被隐藏的 6 个系统内置快捷项。\n\n此操作写入注册表并重启资源管理器，是否继续？"):
+        print("已取消操作。")
+        return
     # subprocess.Popen(['regedit.exe', '/s', get_path("tools/hide_cancel.reg")], creationflags=subprocess.CREATE_NEW_CONSOLE, shell=True)
     # 检查是否管理员
     if not ctypes.windll.shell32.IsUserAnAdmin():
@@ -163,6 +293,10 @@ def explorer_clean(self,namespace_subkey: str = r"Software\Microsoft\Windows\Cur
     """
     # 在函数内部自动解析命令行参数
     dry_run = ("--dry-run" in sys.argv) or ("-n" in sys.argv)
+
+    if not dry_run and not _confirm_action(self, "操作确认", "将删除资源管理器中的广告与无效快捷项（注册表清理）。\n\n是否继续？"):
+        print("已取消操作。")
+        return 0
 
     print()
     print("正在运行：超级白工具箱 - 资源管理器删除广告")
@@ -256,10 +390,21 @@ def del_cache(self):
     global click_times
     click_times += 1
     cache_path = os.path.join(os.path.expanduser('~'), "PyCache")
-    # 真清理
-    if os.path.exists(cache_path):
-        shutil.rmtree(cache_path)
+    core_path = os.path.join(cache_path, "core")
 
+    # 真清理（保留核心组件目录）
+    if os.path.exists(cache_path):
+        for entry in os.listdir(cache_path):
+            full = os.path.join(cache_path, entry)
+            if os.path.abspath(full) == os.path.abspath(core_path):
+                continue  # 核心组件不动
+            try:
+                if os.path.isdir(full):
+                    shutil.rmtree(full)
+                else:
+                    os.remove(full)
+            except OSError:
+                continue
         click_times = 0
 
         messagebox.showinfo(
@@ -330,4 +475,243 @@ def RAMMap(self):
     subprocess.Popen(get_path('tools/bin/RAMMap64.exe'), shell=True)
 
 def Uninstall_ACE(self):
+    if not _confirm_action(self, "操作确认", "将一键根除腾讯 ACE 反作弊及相关组件。\n\n此操作需要管理员权限并可能影响相关游戏，是否继续？"):
+        print("已取消操作。")
+        return
     path = get_path(r"tools/bin/ACE Kill 1.0.5/ACE kill启动.bat"); ctypes.windll.shell32.ShellExecuteW(None, "runas", path, None, None, 1)
+
+
+def steam_accel(self):
+    """Steam 下载加速：运行本地网络重置脚本（提权执行）"""
+    script_path = r"D:\下载\一键解决steam下载慢.bat"
+    if not os.path.exists(script_path):
+        QMessageBox.warning(self, "缺少脚本", "未找到脚本：\n" + script_path)
+        return
+    if not _confirm_action(
+        self,
+        "操作确认",
+        "将运行 Steam 网络重置脚本（重置 Winsock / TCP-IP / DNS 缓存）。\n\n需要管理员权限，运行后请重启 Steam 并重新选择下载区，是否继续？",
+    ):
+        print("已取消 Steam 加速操作。")
+        return
+    print("正在运行 Steam 网络重置脚本...")
+    try:
+        ctypes.windll.shell32.ShellExecuteW(None, "runas", script_path, "", None, 1)
+    except Exception as e:
+        QMessageBox.warning(self, "执行失败", f"无法启动脚本：{e}")
+
+
+def todo_sync_fix(self):
+    """Microsoft To Do 网络同步修复：运行本地脚本（提权执行）"""
+    script_path = r"D:\文档\Microsoft To Do网络同步修复.bat"
+    if not os.path.exists(script_path):
+        QMessageBox.warning(self, "缺少脚本", "未找到脚本：\n" + script_path)
+        return
+    if not _confirm_action(
+        self,
+        "操作确认",
+        "将运行 Microsoft To Do 网络同步修复脚本，\n为 To Do 应用开启网络回环访问权限。\n\n需要管理员权限，是否继续？",
+    ):
+        print("已取消 To Do 同步修复操作。")
+        return
+    print("正在运行 Microsoft To Do 网络同步修复脚本...")
+    try:
+        ctypes.windll.shell32.ShellExecuteW(None, "runas", script_path, "", None, 1)
+    except Exception as e:
+        QMessageBox.warning(self, "执行失败", f"无法启动脚本：{e}")
+
+
+def epic_accel(self):
+    """Epic 下载加速：内置蓝奏直链下载加速器，下载后打开缓存目录"""
+    cache_dir = os.path.join(os.path.expanduser("~"), "PyCache", "Epic加速")
+    os.makedirs(cache_dir, exist_ok=True)
+
+    # 已下载过则直接打开目录
+    existing = [f for f in os.listdir(cache_dir) if f.lower().endswith(".zip")]
+    if existing:
+        try:
+            os.startfile(cache_dir)
+            QMessageBox.information(self, "已存在", "Epic 加速器已下载，已为您打开缓存目录。")
+            return
+        except OSError:
+            pass
+
+    if not _confirm_action(
+        self,
+        "操作确认",
+        "将从内置蓝奏源下载 Epic 下载加速器（Epic下载加速.zip）到缓存目录，\n下载完成后自动打开所在文件夹。\n\n是否继续？",
+    ):
+        print("已取消 Epic 加速器下载。")
+        return
+
+    try:
+        import lanzoui
+        print("正在通过蓝奏直链下载 Epic 下载加速器...")
+        ok = lanzoui.download_file(
+            "https://jitianna.lanzoul.com/iIFUP49shvch",
+            cache_dir,
+            auto_title=True,
+        )
+        if ok:
+            print("Epic 下载加速器下载完成，正在打开缓存目录...")
+            os.startfile(cache_dir)
+            QMessageBox.information(self, "下载完成", "Epic 下载加速器已下载到缓存目录。")
+        else:
+            QMessageBox.warning(self, "下载失败", "蓝奏直链下载失败，请检查网络后重试。")
+    except Exception as e:
+        QMessageBox.warning(self, "下载失败", f"下载出错：{e}")
+
+# ==================== 清理本软件核心组件 ====================
+class CoreCleanDialog(QDialog):
+    """核心组件清理：勾选 PyCache/core 下的文件或文件夹后删除"""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        from PySide6.QtWidgets import QCheckBox, QFrame, QHBoxLayout, QLabel, QPushButton, QVBoxLayout
+
+        self.setWindowTitle("清理本软件核心组件")
+        self.setFixedWidth(460)
+        if parent and not parent.windowIcon().isNull():
+            self.setWindowIcon(parent.windowIcon())
+        self.setStyleSheet(
+            """
+            QDialog {
+                background-color: #f3f6fb;
+            }
+            QFrame#card {
+                background-color: #ffffff;
+                border: 1px solid #dfe7f3;
+                border-radius: 12px;
+            }
+            QLabel#title {
+                color: #b91c1c;
+                font-size: 15px;
+                font-weight: 700;
+            }
+            QLabel#hint {
+                color: #64748b;
+                font-size: 12px;
+            }
+            QCheckBox {
+                color: #1f2937;
+                font-size: 13px;
+                spacing: 8px;
+                padding: 4px 2px;
+            }
+            QScrollArea {
+                border: none;
+            }
+            QPushButton {
+                min-width: 96px;
+                min-height: 34px;
+                border-radius: 8px;
+                background-color: #eef3fb;
+                border: 1px solid #d4deee;
+                color: #1f2937;
+                font-size: 13px;
+            }
+            QPushButton:hover {
+                background-color: #e6eefb;
+            }
+            QPushButton#danger {
+                background-color: #dc2626;
+                border-color: #dc2626;
+                color: white;
+            }
+            QPushButton#danger:hover {
+                background-color: #b91c1c;
+            }
+            """
+        )
+
+        self.core_dir = os.path.join(os.path.expanduser("~"), "PyCache", "core")
+        self.deleted_count = 0
+
+        card = QFrame(self)
+        card.setObjectName("card")
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(14, 14, 14, 14)
+        outer.addWidget(card)
+
+        layout = QVBoxLayout(card)
+        layout.setContentsMargins(16, 14, 16, 14)
+        layout.setSpacing(10)
+
+        title = QLabel("清理本软件核心组件")
+        title.setObjectName("title")
+        layout.addWidget(title)
+
+        if not os.path.isdir(self.core_dir) or not os.listdir(self.core_dir):
+            hint = QLabel("核心组件目录为空，无需清理。")
+            hint.setObjectName("hint")
+            layout.addWidget(hint)
+            btn_close = QPushButton("关闭")
+            btn_close.clicked.connect(self.reject)
+            row = QHBoxLayout()
+            row.addStretch()
+            row.addWidget(btn_close)
+            layout.addLayout(row)
+            return
+
+        hint = QLabel("请勾选要清理的核心组件文件或文件夹：")
+        hint.setObjectName("hint")
+        layout.addWidget(hint)
+
+        from PySide6.QtWidgets import QScrollArea, QWidget as _QWidget
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        body = _QWidget()
+        body_layout = QVBoxLayout(body)
+        body_layout.setContentsMargins(0, 0, 0, 0)
+        body_layout.setSpacing(4)
+        self.checkboxes = []
+        for name in sorted(os.listdir(self.core_dir)):
+            full = os.path.join(self.core_dir, name)
+            label = name + ("  (文件夹)" if os.path.isdir(full) else "")
+            cb = QCheckBox(label)
+            cb.setChecked(True)
+            cb.name = name
+            self.checkboxes.append(cb)
+            body_layout.addWidget(cb)
+        body_layout.addStretch()
+        scroll.setWidget(body)
+        layout.addWidget(scroll, 1)
+
+        btn_ok = QPushButton("确认删除")
+        btn_ok.setObjectName("danger")
+        btn_ok.clicked.connect(self._do_clean)
+        btn_cancel = QPushButton("取消")
+        btn_cancel.clicked.connect(self.reject)
+        row = QHBoxLayout()
+        row.addStretch()
+        row.addWidget(btn_ok)
+        row.addWidget(btn_cancel)
+        layout.addLayout(row)
+
+    def _do_clean(self):
+        if not os.path.isdir(self.core_dir):
+            self.accept()
+            return
+        removed = 0
+        for cb in getattr(self, "checkboxes", []):
+            if not cb.isChecked():
+                continue
+            full = os.path.join(self.core_dir, cb.name)
+            try:
+                if os.path.isdir(full):
+                    shutil.rmtree(full)
+                else:
+                    os.remove(full)
+                removed += 1
+            except OSError:
+                continue
+        messagebox.showinfo("完成", f"已清理 {removed} 个核心组件。")
+        print(f"核心组件清理完成，共 {removed} 项。")
+        self.accept()
+
+
+def clean_core_components(self):
+    dlg = CoreCleanDialog(self)
+    dlg.exec()
+
