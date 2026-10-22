@@ -1,4 +1,6 @@
-# 超级白工具箱 · SuperWhite_TB
+# 超级白工具箱 · baibox
+
+`baibox` 取“白”的拼音加 `box`，软件中文名保留“超级白工具箱”。项目仓库：[jitianOvo/baibox](https://github.com/jitianOvo/baibox)。
 
 Windows 桌面工具箱，主界面使用 PySide6。包含 Android／ADB、文件处理、软件中心、数据备份、视频压缩，以及小说、音乐、视频整合入口「听读看」。
 
